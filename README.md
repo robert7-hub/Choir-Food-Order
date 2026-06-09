@@ -2,7 +2,7 @@
 
 A small mobile-friendly web app for pre-ordering meals on the choir Cape tour.
 
-- **Members** sign in with just their **name and surname**, see two tabs (**Menu** / **My order**), pick **one meal and one drink** per restaurant, and lock it in with a double confirmation. They can only see their own orders.
+- **Members** sign in with their **name and surname + password**, see two tabs (**Menu** / **My order**), pick **one meal and one drink** per restaurant, and lock it in with a double confirmation. They can only see their own orders, and they do not see prices.
 - **You (the organiser)** sign in with a **username (or email) + password**, set up the restaurants and their food/drink options, and see **everyone's** orders with a per-kitchen summary you can read to each venue.
 
 It's a plain static site (HTML/CSS/JS, no build step) backed by **Supabase** (Postgres + Auth + Row Level Security).
@@ -54,7 +54,9 @@ choir-tour-meals/
 2. Open **SQL Editor → New query**, paste all of `supabase/schema.sql`, and click **Run**.
 
 ### 2. Turn on member sign-in
-**Authentication → Providers → Anonymous sign-ins → enable.**
+**Authentication → Providers → Email → enable.**
+
+For instant first-time member signup in the app, disable **Confirm email**.
 
 ### 3. Create your organiser account
 1. **Authentication → Users → Add user.** Enter the organiser account email + a password and tick **Auto Confirm User**.
@@ -113,7 +115,7 @@ Then share the one link with all members. On a phone they can **Add to Home Scre
 
 ## How members and the organiser sign in
 
-- **Member:** opens the link → types name and surname → **Start ordering**. Their name is remembered on that device; their identity is an anonymous Supabase user.
+- **Member:** opens the link → enters name and surname + password → **Log in**. If that name has not been used before, an account is created automatically (using the same name + password for future logins).
 - **Organiser:** opens the link → **I'm the organiser — sign in** → username (or full email) + password from step 3.
 
 ## Day-to-day
@@ -126,5 +128,5 @@ Then share the one link with all members. On a phone they can **Add to Home Scre
 ## Notes & ideas
 
 - To add another organiser, just insert their UID into `public.admins`.
-- "Switch user" on a member's phone signs out the anonymous session and starts fresh — fine for personal phones, but it means that device won't show the previous person's orders (the organiser still sees them all).
+- "Switch user" on a member's phone signs out and returns to login; members can sign back in later with the same name + password to view their own orders.
 - Possible next steps: live updates with Supabase Realtime, an order **deadline** after which the menu locks, dietary tags (veg / halal), or a per-member payment total.

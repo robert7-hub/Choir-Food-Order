@@ -3,6 +3,35 @@ import { supabase, isSupabaseConfigured } from './supabase-client.js';
 
 const CONFIG_ERROR = 'supabase-not-configured';
 const ADMIN_USERNAME_DOMAIN = 'example.com';
+const MEMBER_USERNAME_DOMAIN = 'members.example.com';
+
+export const MEMBER_AUTH_ERRORS = Object.freeze({
+  INVALID_NAME: 'member-invalid-name',
+  INVALID_PASSWORD: 'member-invalid-password',
+  INVALID_CREDENTIALS: 'member-invalid-credentials',
+  EMAIL_CONFIRMATION_REQUIRED: 'member-email-confirmation-required'
+});
+
+function normaliseMemberName(name){
+  return String(name||'')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .replace(/\.{2,}/g, '.')
+    .slice(0, 48);
+}
+function memberNameToEmail(name){
+  const key = normaliseMemberName(name);
+  if(!key) return '';
+  return `${key}@${MEMBER_USERNAME_DOMAIN}`;
+}
+function isInvalidLoginMessage(msg){
+  return msg.includes('invalid login credentials') || msg.includes('invalid credentials');
+}
+function isAlreadyRegisteredMessage(msg){
+  return msg.includes('already registered') || msg.includes('already been registered');
+}
 
 function normaliseAdminLogin(login){
   return String(login||'').trim().toLowerCase();
@@ -24,12 +53,57 @@ export function isConfigured(){
   return isSupabaseConfigured;
 }
 
+export function memberNameFromUser(user){
+  const display = String(user?.user_metadata?.display_name||'').trim();
+  if(display) return display;
+  const email = String(user?.email||'').trim().toLowerCase();
+  const suffix = `@${MEMBER_USERNAME_DOMAIN}`;
+  if(email.endsWith(suffix)){
+    return email.slice(0, -suffix.length).replace(/\./g, ' ').trim();
+  }
+  return '';
+}
+
 /* ---------------- AUTH ---------------- */
-// Members sign in anonymously (name-only flow from the UI).
-export async function signInMember(){
+// Members sign in with name + password.
+// We derive a stable synthetic email from the member name.
+export async function signInMember(name, password){
   const client = getClient();
-  const { error } = await client.auth.signInAnonymously();
-  if(error) throw error;
+  const displayName = String(name||'').trim();
+  const pass = String(password||'');
+  const email = memberNameToEmail(displayName);
+
+  if(!email) throw new Error(MEMBER_AUTH_ERRORS.INVALID_NAME);
+  if(pass.length < 6) throw new Error(MEMBER_AUTH_ERRORS.INVALID_PASSWORD);
+
+  const { data: signInData, error: signInError } = await client.auth.signInWithPassword({ email, password: pass });
+  if(!signInError && signInData?.user){
+    const currentName = String(signInData.user.user_metadata?.display_name||'').trim();
+    if(displayName && currentName !== displayName){
+      await client.auth.updateUser({ data: { display_name: displayName } });
+    }
+    return signInData.user;
+  }
+
+  const signInMsg = String(signInError?.message||'').toLowerCase();
+  if(signInMsg.includes('email not confirmed')) throw new Error(MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED);
+  if(!isInvalidLoginMessage(signInMsg)) throw signInError;
+
+  const { data: signUpData, error: signUpError } = await client.auth.signUp({
+    email,
+    password: pass,
+    options: { data: { display_name: displayName } }
+  });
+  if(signUpError){
+    const signUpMsg = String(signUpError.message||'').toLowerCase();
+    if(isAlreadyRegisteredMessage(signUpMsg) || isInvalidLoginMessage(signUpMsg)){
+      throw new Error(MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS);
+    }
+    throw signUpError;
+  }
+  if(signUpData?.session && signUpData?.user) return signUpData.user;
+
+  throw new Error(MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED);
 }
 // Organiser signs in with username + password.
 // If a full email is supplied, that is used directly.
@@ -52,7 +126,11 @@ export function onAuth(cb){
     cb(null);
     return ()=>{};
   }
-  const { data } = getClient().auth.onAuthStateChange((_event, session)=> cb(session));
+  const client = getClient();
+  client.auth.getSession()
+    .then(({ data })=> cb(data?.session || null))
+    .catch(()=> cb(null));
+  const { data } = client.auth.onAuthStateChange((_event, session)=> cb(session));
   return ()=> data?.subscription?.unsubscribe?.();
 }
 

@@ -71,9 +71,51 @@ drop policy if exists a_select on public.admins;
 create policy a_select on public.admins for select to authenticated using (uid = auth.uid() or public.is_admin());
 -- (no client insert/update/delete — you add organisers from the dashboard)
 
+-- ---------- OPTIONAL MENU SEED: LA GRAPPERIA ----------
+insert into public.restaurants (
+  id, name, place, date, info, food, drinks
+) values (
+  'spice_route_la_grapperia',
+  'Spice Route Destination | La Grapperia Pizza & Bistro',
+  'Spice Route Destination',
+  null,
+  'Menu imported from organiser list.',
+  '[
+    {"id":"food_smash_burger","name":"Smash Burger","price":165,"desc":"Venison Patty, Coleslaw, Cheese, Tomato, Chilli Aioli, Chips"},
+    {"id":"food_chicken_parmesan","name":"Chicken Parmesan","price":175,"desc":"Chicken Fillet, Parmesan, Herbs, Napolitana Tomato Sauce, Mozzarella, Salad"},
+    {"id":"food_margherita","name":"Margherita","price":145,"desc":"Fior di Latte Mozzarella, Napoletana Sauce, Fresh Basil"},
+    {"id":"food_melanzane","name":"Melanzane","price":165,"desc":"Napoletana Sauce, Aubergine, Fior di Latte, Grated Mozzarella"},
+    {"id":"food_bruschetta","name":"Bruschetta","price":110,"desc":"Garlic, Ripe Chopped Tomato, Fresh Basil, Olive Oil"},
+    {"id":"food_brie_caramelised_onion","name":"Brie & Caramelised Onion","price":175,"desc":"Red Caramelised Onion, Brie, Pine Nuts, Olive Oil"},
+    {"id":"food_farmers_salad","name":"Farmer''s Salad","price":135,"desc":"Lettuce, Onion, Tomato, Carrot, Cucumber, Feta Cheese, Ham, Boiled Egg"}
+  ]'::jsonb,
+  '[
+    {"id":"drink_coke","name":"Coke","price":35,"desc":""},
+    {"id":"drink_coke_zero","name":"Coke Zero","price":35,"desc":""},
+    {"id":"drink_fanta_orange","name":"Fanta Orange","price":35,"desc":""},
+    {"id":"drink_creme_soda","name":"Creme Soda","price":35,"desc":""},
+    {"id":"drink_lipton_ice_tea_lemon","name":"Lipton Ice Tea Lemon","price":38,"desc":""},
+    {"id":"drink_lipton_ice_tea_peach","name":"Lipton Ice Tea Peach","price":38,"desc":""},
+    {"id":"drink_fitch_leedes_lemonade","name":"Fitch & Leedes Lemonade","price":30,"desc":""},
+    {"id":"drink_fitch_leedes_tonic","name":"Fitch & Leedes Tonic","price":30,"desc":""},
+    {"id":"drink_fitch_leedes_bitter_lemon","name":"Fitch & Leedes Bitter Lemon","price":30,"desc":""},
+    {"id":"drink_fitch_leedes_club_soda","name":"Fitch & Leedes Club Soda","price":30,"desc":""},
+    {"id":"drink_fitch_leedes_ginger_ale","name":"Fitch & Leedes Ginger Ale","price":30,"desc":""}
+  ]'::jsonb
+)
+on conflict (id) do update
+set
+  name = excluded.name,
+  place = excluded.place,
+  date = excluded.date,
+  info = excluded.info,
+  food = excluded.food,
+  drinks = excluded.drinks;
+
 -- =====================================================================
 --  AFTER running this:
---  1. Authentication → Providers → enable "Anonymous sign-ins".
+--  1. Authentication → Providers → Email: enable Email sign-ins
+--     and disable "Confirm email" for instant member login.
 --  2. Authentication → Users → Add user → your organiser email + password
 --     (tick "Auto confirm").
 --     For username-style login in the app, use username@example.com and

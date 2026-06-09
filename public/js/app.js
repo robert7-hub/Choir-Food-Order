@@ -24,6 +24,7 @@ function dayParts(iso){
 const CONFIG_ERR = 'supabase-not-configured';
 const isConfigError = (e)=>String(e?.message||'').includes(CONFIG_ERR);
 const isSchemaError = (e)=> e?.code==='PGRST205' || /could not find the table/i.test(String(e?.message||''));
+const isMemberAuthError = (e, code)=> String(e?.message||'') === code;
 
 /* ---------- app state ---------- */
 let me = null;          // {name, slug, role:'member'|'admin'}
@@ -43,6 +44,7 @@ const SVG = {
 async function init(){
   // Supabase emits the current session on subscribe, so this also handles
   // returning visitors (their sign-in persists) and fresh visitors.
+  renderOnboard();
   DB.onAuth(applySession);
 }
 async function applySession(session){
@@ -50,7 +52,17 @@ async function applySession(session){
   try{
     const uid = session.user.id;
     const admin = await DB.checkAdmin(uid);
-    const name = localStorage.getItem('memberName') || (admin ? 'Organiser' : 'Member');
+    if(!admin && session.user?.is_anonymous){
+      await DB.signOutAll();
+      me = null;
+      window.__rest = null;
+      renderOnboard();
+      toast('Please sign in with your name and password.');
+      return;
+    }
+    const memberName = DB.memberNameFromUser(session.user) || localStorage.getItem('memberName') || 'Member';
+    const name = admin ? 'Organiser' : memberName;
+    if(!admin) localStorage.setItem('memberName', name);
     me = { uid, name, role: admin ? 'admin' : 'member' };
     menu = await DB.loadMenu();
     if(admin && (tab==='menu' || tab==='orders')) tab = 'setup';
@@ -83,7 +95,10 @@ function renderOnboard(){
         </div>
         <label class="fld"><span>Your name and surname</span>
           <input id="ob-name" class="input" placeholder="e.g. Thabo Mokoena" autocomplete="name" value="${esc(saved)}"></label>
-        <button class="btn brass" id="ob-go">Start ordering</button>
+        <label class="fld"><span>Password</span>
+          <input id="ob-pass" class="input" type="password" placeholder="At least 6 characters" autocomplete="current-password"></label>
+        <button class="btn brass" id="ob-go">Log in</button>
+        <div class="note">First time? Enter your name and create a password. Use the same details to log in later.</div>
         <button class="adminlink" id="ob-admin">I'm the organiser — sign in</button>
         ${configured ? '' : '<div class="note">Supabase is not configured yet. Add your project URL and anon key in public/js/supabase-client.js, then refresh this page.</div>'}
       </div>
@@ -92,22 +107,35 @@ function renderOnboard(){
   $('#ob-go').onclick = async ()=>{
     if(!DB.isConfigured()){ showSupabaseSetupHelp(); return; }
     const name = $('#ob-name').value.trim();
+    const password = ($('#ob-pass')||{}).value || '';
     if(!name){ $('#ob-name').focus(); return; }
+    if(!password){ $('#ob-pass').focus(); return; }
     localStorage.setItem('memberName', name);
-    const btn = $('#ob-go'); btn.disabled = true; btn.textContent = 'Connecting…';
-    try{ await DB.signInMember(); }   // applySession() renders on success
+    const btn = $('#ob-go'); btn.disabled = true; btn.textContent = 'Logging in…';
+    try{ await DB.signInMember(name, password); }   // applySession() renders on success
     catch(e){
-      btn.disabled=false; btn.textContent='Start ordering';
+      btn.disabled=false; btn.textContent='Log in';
       if(isConfigError(e)) showSupabaseSetupHelp();
-      else if(String(e?.message||'').toLowerCase().includes('anonymous sign-ins are disabled')){
-        toast('Enable Anonymous sign-ins in Supabase Authentication -> Providers');
+      else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_NAME)){
+        $('#ob-name').focus();
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_PASSWORD)){
+        toast('Password must be at least 6 characters');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS)){
+        toast('Wrong name or password');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED)){
+        toast('Disable "Confirm email" in Supabase Email provider for instant member login');
+      } else if(String(e?.message||'').toLowerCase().includes('rate limit')){
+        toast('Too many sign-up attempts right now. Please wait a few minutes and try again.');
       } else {
         toast('Could not connect — check your internet');
       }
       console.error(e);
     }
   };
-  $('#ob-name').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#ob-go').click(); });
+  ['#ob-name','#ob-pass'].forEach(sel=>{
+    const input = $(sel);
+    if(input) input.addEventListener('keydown',e=>{ if(e.key==='Enter') $('#ob-go').click(); });
+  });
   $('#ob-admin').onclick = ()=> DB.isConfigured() ? askAdminLogin() : showSupabaseSetupHelp();
 }
 
@@ -134,7 +162,7 @@ function showSchemaSetupHelp(){
     custom:`<div class="note" style="text-align:left;margin:0">
       1. Open supabase/schema.sql in this project<br>
       2. Paste it into Supabase SQL Editor and run it once<br>
-      3. In Auth Providers, keep Anonymous sign-ins enabled<br>
+      3. In Auth Providers, enable Email sign-ins and disable Confirm email<br>
       4. Refresh this page
     </div>`,
     actions:[{label:'OK', cls:'btn', fn:closeModal}]
@@ -205,7 +233,7 @@ function render(){
 function confirmSignout(){
   const admin = me.role==='admin';
   modal({ icon: admin?'🚪':'👤', title: admin?'Exit admin?':'Switch user?',
-    text: admin?'You\'ll return to the member sign-in screen.':'Your saved orders stay safe. You\'ll need to enter a name again to view them.',
+    text: admin?'You\'ll return to the member sign-in screen.':'Your saved orders stay safe. Use your name and password to log in again later.',
     actions:[
       {label:'Yes', cls:'btn', fn:async ()=>{ window.__rest=null; closeModal(); await DB.signOutAll(); }},
       {label:'Stay', cls:'btn ghost', fn:closeModal}
@@ -275,8 +303,9 @@ async function renderRestaurant(restId){
 
   const food = (r.food||[]);
   const drinks = (r.drinks||[]);
-  if(food.length){ c.appendChild(el(`<h2 class="sec">Choose your meal <span class="hint">pick one</span></h2>`)); c.appendChild(selectList(food, restId, 'food')); }
-  if(drinks.length){ c.appendChild(el(`<h2 class="sec">Choose a drink <span class="hint">pick one</span></h2>`)); c.appendChild(selectList(drinks, restId, 'drink')); }
+  const showPrices = me?.role === 'admin';
+  if(food.length){ c.appendChild(el(`<h2 class="sec">Choose your meal <span class="hint">pick one</span></h2>`)); c.appendChild(selectList(food, restId, 'food', showPrices)); }
+  if(drinks.length){ c.appendChild(el(`<h2 class="sec">Choose a drink <span class="hint">pick one</span></h2>`)); c.appendChild(selectList(drinks, restId, 'drink', showPrices)); }
   if(!food.length && !drinks.length){ c.appendChild(el(`<div class="card empty">No options added for this stop yet.</div>`)); return; }
 
   const sumBox = el(`<div id="sumbox"></div>`);
@@ -287,14 +316,14 @@ async function renderRestaurant(restId){
   refreshSummary(r);
 }
 
-function selectList(items, restId, kind){
+function selectList(items, restId, kind, showPrices=false){
   // single-select: each member picks ONE option per category (tap again to clear)
   const box = el(`<div class="selgroup"></div>`);
   items.forEach(it=>{
     const opt = el(`
       <button type="button" class="opt" data-id="${it.id}">
         <span class="tick" aria-hidden="true"></span>
-        <span class="nm"><b>${esc(it.name)}</b>${it.desc?`<div class="ing">${esc(it.desc)}</div>`:''}${it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</span>
+        <span class="nm"><b>${esc(it.name)}</b>${it.desc?`<div class="ing">${esc(it.desc)}</div>`:''}${showPrices&&it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</span>
       </button>`);
     opt.onclick = ()=>{
       const cur = (cart[restId]||{})[kind];
@@ -319,6 +348,7 @@ function cartLines(r){
 function refreshSummary(r){
   const box = $('#sumbox'); if(!box) return;
   const {lines,total} = cartLines(r);
+  const showPrices = me?.role === 'admin';
   const anyPrice = (r.food||[]).concat(r.drinks||[]).some(i=>i.price);
   const save = $('#save');
   const needFood = (r.food||[]).length>0;
@@ -330,8 +360,8 @@ function refreshSummary(r){
     return;
   }
   box.innerHTML = `<div class="summary">
-    ${lines.map(l=>`<div class="ln"><span>${esc(l.name)}</span><span>${anyPrice?fmtMoney(l.sub):''}</span></div>`).join('')}
-    ${anyPrice?`<div class="ln tot"><span>Total</span><span>${fmtMoney(total)}</span></div>`:''}
+    ${lines.map(l=>`<div class="ln"><span>${esc(l.name)}</span>${showPrices&&anyPrice?`<span>${fmtMoney(l.sub)}</span>`:''}</div>`).join('')}
+    ${showPrices&&anyPrice?`<div class="ln tot"><span>Total</span><span>${fmtMoney(total)}</span></div>`:''}
     ${needFood&&!hasFood?`<div class="empty" style="margin-top:6px">Please choose a meal to continue.</div>`:''}
   </div>`;
 }
@@ -403,7 +433,7 @@ async function renderMyOrders(){
 
 function ticketEl(o){
   const dp = dayParts(o.date);
-  const anyPrice = o.items.some(i=>i.price);
+  const anyPrice = me?.role === 'admin' && o.items.some(i=>i.price);
   return el(`
     <div class="ticket">
       <div class="stub">
@@ -412,7 +442,7 @@ function ticketEl(o){
       </div>
       <div class="stamp">FINAL</div>
       <div class="body">
-        ${o.items.map(i=>`<div class="row"><span><span class="q">${i.type==='drink'?'🥤':'🍽️'}</span>${esc(i.name)}</span><span>${anyPrice?fmtMoney(i.sub):''}</span></div>`).join('')}
+        ${o.items.map(i=>`<div class="row"><span><span class="q">${i.type==='drink'?'🥤':'🍽️'}</span>${esc(i.name)}</span>${anyPrice?`<span>${fmtMoney(i.sub)}</span>`:''}</div>`).join('')}
         ${anyPrice?`<div class="ttl"><span>Total</span><span>${fmtMoney(o.total)}</span></div>`:''}
       </div>
       <div class="foot">Placed ${new Date(o.placedAt).toLocaleString('en-ZA',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} · cannot be changed</div>
