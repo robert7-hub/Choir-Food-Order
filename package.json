@@ -1,0 +1,13 @@
+{
+  "name": "choir-tour-meals",
+  "version": "1.0.0",
+  "description": "Pre-order meals for the choir Cape tour (Supabase backend).",
+  "private": true,
+  "dependencies": {
+    "serve": "^14.2.5"
+  },
+  "scripts": {
+    "dev": "serve public",
+    "start": "serve public"
+  }
+}

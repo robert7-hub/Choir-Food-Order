@@ -1,0 +1,9 @@
+{
+  "name": "Choir Tour Meals",
+  "short_name": "Tour Meals",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#1f3d34",
+  "theme_color": "#1f3d34",
+  "icons": []
+}

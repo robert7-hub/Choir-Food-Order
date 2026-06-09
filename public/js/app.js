@@ -1,0 +1,635 @@
+// Choir Tour Meals — UI. Data + auth come from data.js (Supabase).
+import * as DB from './data.js';
+
+/* ===========================================================
+   CHOIR TOUR MEALS
+   Admin sets up restaurants + sees every order.
+   Members get two tabs (Menu / My order) and place a final,
+   double-confirmed, non-editable order per restaurant.
+   =========================================================== */
+
+/* Data + auth live in data.js (Supabase). See imports at top of file. */
+/* ---------- small utils ---------- */
+const $ = (sel)=>document.querySelector(sel);
+const el = (html)=>{ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; };
+const esc = (s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const rid = ()=>Math.random().toString(36).slice(2,8);
+function fmtMoney(n){ return 'R' + Number(n||0).toFixed(2); }
+function dayParts(iso){
+  if(!iso) return {d:'–',m:''};
+  const dt = new Date(iso+'T00:00');
+  if(isNaN(dt)) return {d:'–',m:''};
+  return { d:String(dt.getDate()), m:dt.toLocaleString('en-ZA',{month:'short'}), full:dt.toLocaleDateString('en-ZA',{weekday:'long',day:'numeric',month:'long'}) };
+}
+const CONFIG_ERR = 'supabase-not-configured';
+const isConfigError = (e)=>String(e?.message||'').includes(CONFIG_ERR);
+const isSchemaError = (e)=> e?.code==='PGRST205' || /could not find the table/i.test(String(e?.message||''));
+
+/* ---------- app state ---------- */
+let me = null;          // {name, slug, role:'member'|'admin'}
+let menu = [];          // restaurants
+let tab = 'menu';       // current tab
+let cart = {};          // restId -> {itemId: qty}
+const SVG = {
+  menu:'<svg viewBox="0 0 24 24"><path d="M4 5h16M4 10h16M4 15h10"/></svg>',
+  orders:'<svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h6M9 16h6"/></svg>',
+  setup:'<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>',
+  all:'<svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>'
+};
+
+/* ===========================================================
+   INIT
+   =========================================================== */
+async function init(){
+  // Supabase emits the current session on subscribe, so this also handles
+  // returning visitors (their sign-in persists) and fresh visitors.
+  DB.onAuth(applySession);
+}
+async function applySession(session){
+  if(!session){ me = null; window.__rest = null; renderOnboard(); return; }
+  try{
+    const uid = session.user.id;
+    const admin = await DB.checkAdmin(uid);
+    const name = localStorage.getItem('memberName') || (admin ? 'Organiser' : 'Member');
+    me = { uid, name, role: admin ? 'admin' : 'member' };
+    menu = await DB.loadMenu();
+    if(admin && (tab==='menu' || tab==='orders')) tab = 'setup';
+    render();
+  }catch(e){
+    console.error(e);
+    me = null;
+    renderOnboard();
+    if(isConfigError(e)) showSupabaseSetupHelp();
+    else if(isSchemaError(e)) showSchemaSetupHelp();
+    else toast('Could not load your session. Please refresh and try again.');
+  }
+}
+
+/* ===========================================================
+   ONBOARDING
+   =========================================================== */
+function renderOnboard(){
+  const app = $('#app');
+  app.innerHTML = '';
+  const saved = localStorage.getItem('memberName') || '';
+  const configured = DB.isConfigured();
+  const wrap = el(`
+    <div class="onboard">
+      <div class="obcard">
+        <div class="crest">
+          <div class="k">Choir Cape Tour</div>
+          <div class="t">Tour Meals</div>
+          <div class="s">Pre-order your meal &amp; drink for each stop</div>
+        </div>
+        <label class="fld"><span>Your name and surname</span>
+          <input id="ob-name" class="input" placeholder="e.g. Thabo Mokoena" autocomplete="name" value="${esc(saved)}"></label>
+        <button class="btn brass" id="ob-go">Start ordering</button>
+        <button class="adminlink" id="ob-admin">I'm the organiser — sign in</button>
+        ${configured ? '' : '<div class="note">Supabase is not configured yet. Add your project URL and anon key in public/js/supabase-client.js, then refresh this page.</div>'}
+      </div>
+    </div>`);
+  app.appendChild(wrap);
+  $('#ob-go').onclick = async ()=>{
+    if(!DB.isConfigured()){ showSupabaseSetupHelp(); return; }
+    const name = $('#ob-name').value.trim();
+    if(!name){ $('#ob-name').focus(); return; }
+    localStorage.setItem('memberName', name);
+    const btn = $('#ob-go'); btn.disabled = true; btn.textContent = 'Connecting…';
+    try{ await DB.signInMember(); }   // applySession() renders on success
+    catch(e){
+      btn.disabled=false; btn.textContent='Start ordering';
+      if(isConfigError(e)) showSupabaseSetupHelp();
+      else if(String(e?.message||'').toLowerCase().includes('anonymous sign-ins are disabled')){
+        toast('Enable Anonymous sign-ins in Supabase Authentication -> Providers');
+      } else {
+        toast('Could not connect — check your internet');
+      }
+      console.error(e);
+    }
+  };
+  $('#ob-name').addEventListener('keydown',e=>{ if(e.key==='Enter') $('#ob-go').click(); });
+  $('#ob-admin').onclick = ()=> DB.isConfigured() ? askAdminLogin() : showSupabaseSetupHelp();
+}
+
+function showSupabaseSetupHelp(){
+  modal({
+    icon:'⚙️',
+    title:'Finish Supabase setup',
+    text:'This app needs your Supabase project details before sign-in can work.',
+    custom:`<div class="note" style="text-align:left;margin:0">
+      1. Open public/js/supabase-client.js<br>
+      2. Replace SUPABASE_URL and SUPABASE_ANON_KEY<br>
+      3. Run supabase/schema.sql in your Supabase SQL editor<br>
+      4. Refresh this page
+    </div>`,
+    actions:[{label:'OK', cls:'btn', fn:closeModal}]
+  });
+}
+
+function showSchemaSetupHelp(){
+  modal({
+    icon:'🧱',
+    title:'Set up database tables',
+    text:'Supabase auth works, but this project is missing the required tables.',
+    custom:`<div class="note" style="text-align:left;margin:0">
+      1. Open supabase/schema.sql in this project<br>
+      2. Paste it into Supabase SQL Editor and run it once<br>
+      3. In Auth Providers, keep Anonymous sign-ins enabled<br>
+      4. Refresh this page
+    </div>`,
+    actions:[{label:'OK', cls:'btn', fn:closeModal}]
+  });
+}
+
+function askAdminLogin(){
+  modal({
+    icon:'🔑', title:'Organiser sign in', text:'Sign in with your organiser username and password to manage the menu and view everyone\'s orders.',
+    custom:`<label class="fld" style="text-align:left"><span>Username (or email)</span><input id="ad-login" class="input" autocomplete="username" placeholder="e.g. organiser or you@example.com"></label>
+            <label class="fld" style="text-align:left"><span>Password</span><input id="ad-pass" class="input" type="password" autocomplete="current-password"></label>`,
+    actions:[
+      {label:'Sign in', cls:'btn brass', keep:true, fn:async ()=>{
+        const login=($('#ad-login')||{}).value, pass=($('#ad-pass')||{}).value;
+        try{
+          const user = await DB.signInAdmin(login, pass);
+          const admin = await DB.checkAdmin(user.id);
+          if(!admin){ await DB.signOutAll(); throw new Error('not-admin'); }
+          tab='setup'; closeModal();   // applySession() renders the admin view
+        }catch(e){
+          if(isConfigError(e)){ closeModal(); showSupabaseSetupHelp(); return; }
+          const p=$('#ad-pass'); if(p){ p.style.borderColor='var(--danger)'; p.value=''; }
+          toast(e.message==='not-admin' ? "That account isn't set up as an organiser" : 'Wrong username or password');
+        }
+      }},
+      {label:'Cancel', cls:'btn ghost', fn:closeModal}
+    ]
+  });
+  setTimeout(()=>{ const e=$('#ad-login'); if(e) e.focus(); },50);
+}
+
+/* ===========================================================
+   MAIN SHELL
+   =========================================================== */
+function render(){
+  const app = $('#app');
+  app.innerHTML='';
+  const isAdmin = me.role==='admin';
+  const nav = isAdmin
+    ? [['setup','Menu setup',SVG.setup],['all','All orders',SVG.all]]
+    : [['menu','Menu',SVG.menu],['orders','My order',SVG.orders]];
+  if(!nav.find(n=>n[0]===tab)) tab = nav[0][0];
+
+  const shell = el(`
+    <div class="shell">
+      <nav class="rail">
+        <div class="brand"><b>Tour Meals</b>Choir Cape Tour</div>
+        ${nav.map(n=>`<button class="navbtn ${tab===n[0]?'active':''}" data-tab="${n[0]}">${n[2]}<span>${esc(n[1])}</span></button>`).join('')}
+        <div class="spacer"></div>
+        <div class="railfoot"><button id="signout">${isAdmin?'Exit admin':'Switch user'}</button></div>
+      </nav>
+      <div class="main">
+        <div class="topbar ${isAdmin?'':''}">
+          <h1 id="ptitle"></h1>
+          <div class="who">${isAdmin?'Admin':'Hi'} <b>${esc(isAdmin?'Organiser':me.name)}</b></div>
+        </div>
+        <div class="content" id="content"></div>
+      </div>
+    </div>`);
+  app.appendChild(shell);
+  shell.querySelectorAll('.navbtn').forEach(b=> b.onclick = ()=>{ tab=b.dataset.tab; render(); });
+  $('#signout').onclick = ()=> confirmSignout();
+
+  if(isAdmin){ tab==='all' ? renderAllOrders() : renderSetup(); }
+  else { tab==='orders' ? renderMyOrders() : (window.__rest ? renderRestaurant(window.__rest) : renderMenu()); }
+}
+
+function confirmSignout(){
+  const admin = me.role==='admin';
+  modal({ icon: admin?'🚪':'👤', title: admin?'Exit admin?':'Switch user?',
+    text: admin?'You\'ll return to the member sign-in screen.':'Your saved orders stay safe. You\'ll need to enter a name again to view them.',
+    actions:[
+      {label:'Yes', cls:'btn', fn:async ()=>{ window.__rest=null; closeModal(); await DB.signOutAll(); }},
+      {label:'Stay', cls:'btn ghost', fn:closeModal}
+    ]});
+}
+
+/* ===========================================================
+   MEMBER — MENU TAB
+   =========================================================== */
+async function renderMenu(){
+  window.__rest = null;
+  $('#ptitle').textContent = 'Where we\'re eating';
+  const c = $('#content');
+  c.innerHTML = `<p class="eyebrow">Menu</p><p class="lead">Tap a stop to choose your meal. You order once per restaurant — and it can't be changed after you save.</p>`;
+  if(!menu.length){
+    c.appendChild(el(`<div class="card empty">The organiser hasn't added any restaurants yet. Check back soon.</div>`));
+    return;
+  }
+  // which restaurants has this member already ordered for?
+  const mine = await myOrderMap();
+  menu.forEach(r=>{
+    const dp = dayParts(r.date);
+    const done = !!mine[r.id];
+    const card = el(`
+      <div class="card rcard" data-id="${r.id}">
+        <div class="day"><div class="d">${dp.d}</div><div class="m">${dp.m}</div></div>
+        <div class="meta">
+          <h3>${esc(r.name)}</h3>
+          <div class="place">${esc(r.place||'')}${r.place&&dp.full?' · ':''}${dp.full||''}</div>
+          <div style="margin-top:8px">${done?'<span class="pill locked">✓ Order placed</span>':'<span class="pill open">Tap to order</span>'}</div>
+        </div>
+        <div class="arrow">›</div>
+      </div>`);
+    card.onclick = ()=>{ window.__rest = r.id; renderRestaurant(r.id); };
+    c.appendChild(card);
+  });
+}
+
+/* ----- ordering screen for one restaurant ----- */
+async function renderRestaurant(restId){
+  const r = menu.find(x=>x.id===restId);
+  if(!r){ window.__rest=null; return renderMenu(); }
+  window.__rest = restId;
+  const dp = dayParts(r.date);
+  $('#ptitle').textContent = r.name;
+  const c = $('#content');
+  c.innerHTML='';
+  c.appendChild(el(`<button class="btn ghost sm" id="back" style="margin-bottom:14px">‹ Back to menu</button>`));
+  $('#back').onclick = ()=>{ window.__rest=null; renderMenu(); };
+
+  // already ordered? show locked ticket
+  const mine = await myOrderMap();
+  if(mine[r.id]){
+    c.appendChild(el(`<p class="eyebrow">Your order — final</p>`));
+    c.appendChild(ticketEl(mine[r.id]));
+    c.appendChild(el(`<div class="card empty">This order is locked and can't be changed. Speak to the organiser if something's wrong.</div>`));
+    return;
+  }
+
+  cart[restId] = cart[restId] || { food:null, drink:null };
+  c.appendChild(el(`
+    <div class="card" style="display:flex;gap:14px;align-items:center;background:var(--green);color:#fff;border:0">
+      <div style="text-align:center;font-family:var(--serif)"><div style="font-size:30px;font-weight:700;line-height:1">${dp.d}</div><div style="font-size:11px;letter-spacing:1px;text-transform:uppercase;opacity:.85">${dp.m}</div></div>
+      <div><div style="font-family:var(--serif);font-size:20px">${esc(r.name)}</div><div style="font-size:13px;opacity:.85">${esc(r.place||'')} ${dp.full?'· '+dp.full:''}</div></div>
+    </div>`));
+  if(r.info) c.appendChild(el(`<p class="lead">${esc(r.info)}</p>`));
+
+  const food = (r.food||[]);
+  const drinks = (r.drinks||[]);
+  if(food.length){ c.appendChild(el(`<h2 class="sec">Choose your meal <span class="hint">pick one</span></h2>`)); c.appendChild(selectList(food, restId, 'food')); }
+  if(drinks.length){ c.appendChild(el(`<h2 class="sec">Choose a drink <span class="hint">pick one</span></h2>`)); c.appendChild(selectList(drinks, restId, 'drink')); }
+  if(!food.length && !drinks.length){ c.appendChild(el(`<div class="card empty">No options added for this stop yet.</div>`)); return; }
+
+  const sumBox = el(`<div id="sumbox"></div>`);
+  c.appendChild(sumBox);
+  const saveBtn = el(`<button class="btn brass" id="save">Save my order</button>`);
+  c.appendChild(saveBtn);
+  saveBtn.onclick = ()=> startSaveFlow(r);
+  refreshSummary(r);
+}
+
+function selectList(items, restId, kind){
+  // single-select: each member picks ONE option per category (tap again to clear)
+  const box = el(`<div class="selgroup"></div>`);
+  items.forEach(it=>{
+    const opt = el(`
+      <button type="button" class="opt" data-id="${it.id}">
+        <span class="tick" aria-hidden="true"></span>
+        <span class="nm"><b>${esc(it.name)}</b>${it.desc?`<div class="ing">${esc(it.desc)}</div>`:''}${it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</span>
+      </button>`);
+    opt.onclick = ()=>{
+      const cur = (cart[restId]||{})[kind];
+      cart[restId][kind] = (cur===it.id) ? null : it.id;
+      box.querySelectorAll('.opt').forEach(o=> o.classList.toggle('sel', o.dataset.id===cart[restId][kind]));
+      refreshSummary(menu.find(x=>x.id===restId));
+    };
+    if((cart[restId]||{})[kind]===it.id) opt.classList.add('sel');
+    box.appendChild(opt);
+  });
+  return box;
+}
+
+function cartLines(r){
+  const sel = cart[r.id] || {};
+  const lines=[]; let total=0;
+  const pick=(arr,kind)=>{ const it=(arr||[]).find(x=>x.id===sel[kind]); if(it){ const p=it.price||0; total+=p; lines.push({name:it.name,type:kind,qty:1,price:p,sub:p}); } };
+  pick(r.food,'food'); pick(r.drinks,'drink');
+  return {lines, total};
+}
+
+function refreshSummary(r){
+  const box = $('#sumbox'); if(!box) return;
+  const {lines,total} = cartLines(r);
+  const anyPrice = (r.food||[]).concat(r.drinks||[]).some(i=>i.price);
+  const save = $('#save');
+  const needFood = (r.food||[]).length>0;
+  const hasFood  = !!(cart[r.id]||{}).food;
+  const valid = needFood ? hasFood : lines.length>0;
+  if(save) save.disabled = !valid;
+  if(!lines.length){
+    box.innerHTML = `<div class="summary"><div class="empty">Choose your meal${(r.drinks||[]).length?' and a drink':''} above.</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="summary">
+    ${lines.map(l=>`<div class="ln"><span>${esc(l.name)}</span><span>${anyPrice?fmtMoney(l.sub):''}</span></div>`).join('')}
+    ${anyPrice?`<div class="ln tot"><span>Total</span><span>${fmtMoney(total)}</span></div>`:''}
+    ${needFood&&!hasFood?`<div class="empty" style="margin-top:6px">Please choose a meal to continue.</div>`:''}
+  </div>`;
+}
+
+/* ----- double confirmation + save ----- */
+function startSaveFlow(r){
+  const {lines} = cartLines(r);
+  if(!lines.length) return;
+  // PROMPT 1
+  modal({
+    icon:'📝', title:'Save this order?',
+    text:`Once saved, your order for ${r.name} cannot be changed. Are you happy to save it?`,
+    custom:`<div class="summary" style="text-align:left">${lines.map(l=>`<div class="ln"><span>${esc(l.name)}</span></div>`).join('')}</div>`,
+    actions:[
+      {label:'Yes, save it', cls:'btn brass', keep:true, fn:()=> confirmFinal(r)},
+      {label:'Not yet', cls:'btn ghost', fn:closeModal}
+    ]
+  });
+}
+function confirmFinal(r){
+  // PROMPT 2
+  modal({
+    icon:'⚠️', title:'Are you really, really sure?',
+    text:'This is your final answer. After this you will not be able to change or add to this order.',
+    actions:[
+      {label:'Yes — lock it in', cls:'btn', keep:true, fn:()=> saveOrder(r)},
+      {label:'Go back', cls:'btn ghost', fn:closeModal}
+    ]
+  });
+}
+async function saveOrder(r){
+  const {lines,total} = cartLines(r);
+  const order = {
+    uid: me.uid, member: me.name,
+    restId: r.id, restName: r.name, place: r.place||'', date: r.date||'',
+    items: lines, total, placedAt: new Date().toISOString()
+  };
+  try{
+    await DB.placeOrder(order);
+    closeModal(); cart[r.id] = { food:null, drink:null };
+    toast('Order locked in ✓'); window.__rest=null; tab='orders'; render();
+  }catch(e){
+    closeModal(); console.error(e);
+    toast(/duplicate|unique/i.test(e.message||'') ? 'You already ordered for this stop' : 'Could not save — please try again');
+  }
+}
+
+/* ===========================================================
+   MEMBER — MY ORDERS TAB
+   =========================================================== */
+async function myOrderMap(){
+  const list = await DB.getMyOrders(me.uid);
+  const map = {};
+  list.forEach(o=> map[o.restId]=o);
+  return map;
+}
+async function renderMyOrders(){
+  $('#ptitle').textContent = 'My order';
+  const c = $('#content');
+  c.innerHTML = `<p class="eyebrow">My order</p><p class="lead">Your locked orders for the tour. These are final.</p>`;
+  const map = await myOrderMap();
+  const list = Object.values(map).sort((a,b)=>(a.date||'').localeCompare(b.date||''));
+  if(!list.length){
+    c.appendChild(el(`<div class="card empty">You haven't placed any orders yet. Open the <b>Menu</b> tab to choose your meals.</div>`));
+    return;
+  }
+  list.forEach(o=> c.appendChild(ticketEl(o)));
+}
+
+function ticketEl(o){
+  const dp = dayParts(o.date);
+  const anyPrice = o.items.some(i=>i.price);
+  return el(`
+    <div class="ticket">
+      <div class="stub">
+        <div class="day"><div class="d">${dp.d}</div><div class="m">${dp.m}</div></div>
+        <div><h3>${esc(o.restName)}</h3><div class="sub">${esc(o.place||'')} ${dp.full?'· '+dp.full:''}</div></div>
+      </div>
+      <div class="stamp">FINAL</div>
+      <div class="body">
+        ${o.items.map(i=>`<div class="row"><span><span class="q">${i.type==='drink'?'🥤':'🍽️'}</span>${esc(i.name)}</span><span>${anyPrice?fmtMoney(i.sub):''}</span></div>`).join('')}
+        ${anyPrice?`<div class="ttl"><span>Total</span><span>${fmtMoney(o.total)}</span></div>`:''}
+      </div>
+      <div class="foot">Placed ${new Date(o.placedAt).toLocaleString('en-ZA',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} · cannot be changed</div>
+    </div>`);
+}
+
+/* ===========================================================
+   ADMIN — MENU SETUP
+   =========================================================== */
+function renderSetup(){
+  $('#ptitle').textContent = 'Menu setup';
+  const c = $('#content');
+  c.innerHTML = `<p class="eyebrow">Admin</p><p class="lead">Add the restaurants the choir will visit, with the date and the food &amp; drink options members can choose from.</p>`;
+  c.appendChild(el(`<button class="btn brass" id="addr">+ Add a restaurant</button>`));
+  $('#addr').onclick = ()=> editRestaurant(null);
+
+  c.appendChild(el(`<h2 class="sec">Restaurants on the tour</h2>`));
+  if(!menu.length){ c.appendChild(el(`<div class="card empty">No restaurants yet — add your first one above.</div>`)); return; }
+  menu.forEach(r=>{
+    const dp = dayParts(r.date);
+    const card = el(`
+      <div class="card">
+        <div style="display:flex;gap:12px;align-items:flex-start">
+          <div class="day" style="flex:0 0 54px;text-align:center;background:var(--green);color:#fff;border-radius:10px;padding:8px 4px;font-family:var(--serif)">
+            <div style="font-size:20px;font-weight:700;line-height:1">${dp.d}</div><div style="font-size:10px;letter-spacing:1px;text-transform:uppercase;opacity:.85">${dp.m}</div></div>
+          <div style="flex:1;min-width:0">
+            <h3 style="font-family:var(--serif);margin:0;font-size:18px">${esc(r.name)}</h3>
+            <div style="font-size:13px;color:var(--muted)">${esc(r.place||'')} ${dp.full?'· '+dp.full:''}</div>
+            <div style="font-size:12.5px;color:var(--muted);margin-top:4px">${(r.food||[]).length} food · ${(r.drinks||[]).length} drinks</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:12px">
+          <button class="btn ghost sm" data-edit="${r.id}">Edit</button>
+          <button class="btn danger sm" data-del="${r.id}">Delete</button>
+        </div>
+      </div>`);
+    card.querySelector('[data-edit]').onclick = ()=> editRestaurant(r.id);
+    card.querySelector('[data-del]').onclick = ()=> delRestaurant(r);
+    c.appendChild(card);
+  });
+}
+
+function delRestaurant(r){
+  modal({icon:'🗑️', title:`Delete ${r.name}?`, text:'It will be removed from the menu. Orders members already placed are kept.',
+    actions:[
+      {label:'Delete', cls:'btn danger', fn:async ()=>{ try{ await DB.deleteRestaurant(r.id); menu = await DB.loadMenu(); closeModal(); renderSetup(); toast('Restaurant deleted'); }catch(e){ closeModal(); toast('Could not delete'); console.error(e); } }},
+      {label:'Cancel', cls:'btn ghost', fn:closeModal}
+    ]});
+}
+
+/* draft buffer for the editor */
+let draft = null;
+function editRestaurant(id){
+  const existing = id ? menu.find(x=>x.id===id) : null;
+  draft = existing ? JSON.parse(JSON.stringify(existing))
+                    : { id:rid(), name:'', place:'', date:'', info:'', food:[], drinks:[] };
+  $('#ptitle').textContent = existing ? 'Edit restaurant' : 'New restaurant';
+  const c = $('#content');
+  c.innerHTML='';
+  c.appendChild(el(`<button class="btn ghost sm" id="back" style="margin-bottom:14px">‹ Back</button>`));
+  $('#back').onclick = ()=> renderSetup();
+
+  const form = el(`<div class="card">
+    <label class="fld"><span>Restaurant name</span><input class="input" id="f-name" value="${esc(draft.name)}" placeholder="e.g. Spice Route — La Grapperia"></label>
+    <label class="fld"><span>Place / area (optional)</span><input class="input" id="f-place" value="${esc(draft.place)}" placeholder="e.g. Paarl"></label>
+    <label class="fld"><span>Date we eat there</span><input class="input" id="f-date" type="date" value="${esc(draft.date)}"></label>
+    <label class="fld"><span>Note for members (optional)</span><textarea class="input" id="f-info" placeholder="e.g. Buffet starts 13:00. Vegetarian options marked.">${esc(draft.info)}</textarea></label>
+  </div>`);
+  c.appendChild(form);
+
+  c.appendChild(el(`<h2 class="sec">Food options</h2>`));
+  const foodBox = el(`<div class="card" id="foodbox" style="padding:4px 16px"></div>`); c.appendChild(foodBox);
+  c.appendChild(optionAdder('food'));
+  c.appendChild(el(`<h2 class="sec">Drink options</h2>`));
+  const drinkBox = el(`<div class="card" id="drinkbox" style="padding:4px 16px"></div>`); c.appendChild(drinkBox);
+  c.appendChild(optionAdder('drinks'));
+
+  drawOptions();
+  const save = el(`<button class="btn brass" id="rsave" style="margin-top:18px">Save restaurant</button>`);
+  c.appendChild(save);
+  save.onclick = saveRestaurant;
+}
+
+function optionAdder(kind){
+  const box = el(`<div class="card">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+      <label class="fld" style="flex:1;min-width:140px;margin:0"><span>Add ${kind==='food'?'a dish':'a drink'}</span><input class="input add-name" placeholder="${kind==='food'?'e.g. Lamb potjie':'e.g. Rooibos iced tea'}"></label>
+      <label class="fld" style="width:110px;margin:0"><span>Price (optional)</span><input class="input add-price" type="number" min="0" step="0.01" placeholder="R"></label>
+    </div>
+    <label class="fld" style="margin:10px 0 0"><span>Ingredients / what's in it (optional)</span><input class="input add-desc" placeholder="${kind==='food'?'e.g. Slow-cooked lamb, potatoes, carrots, red wine':'e.g. Rooibos tea, lemon, honey, ice'}"></label>
+    <button class="btn sm add-btn" style="width:auto;margin-top:10px">Add</button>
+  </div>`);
+  const nameI=box.querySelector('.add-name'), priceI=box.querySelector('.add-price'), descI=box.querySelector('.add-desc');
+  const add=()=>{ const n=nameI.value.trim(); if(!n) return; const p=parseFloat(priceI.value)||0; const d=descI.value.trim();
+    draft[kind].push({id:rid(),name:n,price:p,desc:d}); nameI.value=''; priceI.value=''; descI.value=''; nameI.focus(); drawOptions(); };
+  box.querySelector('.add-btn').onclick=add;
+  [nameI,descI].forEach(i=> i.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();add();} }));
+  return box;
+}
+function drawOptions(){
+  ['food','drinks'].forEach(kind=>{
+    const box = $(kind==='food'?'#foodbox':'#drinkbox'); if(!box) return;
+    const items = draft[kind];
+    if(!items.length){ box.innerHTML=`<div class="empty">None added yet.</div>`; return; }
+    box.innerHTML='';
+    items.forEach(it=>{
+      const row = el(`<div class="item"><div class="nm"><b>${esc(it.name)}</b>${it.desc?`<div class="ing">${esc(it.desc)}</div>`:''}${it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</div>
+        <button class="btn danger sm" style="width:auto">Remove</button></div>`);
+      row.querySelector('button').onclick=()=>{ draft[kind]=draft[kind].filter(x=>x.id!==it.id); drawOptions(); };
+      box.appendChild(row);
+    });
+  });
+}
+async function saveRestaurant(){
+  draft.name = $('#f-name').value.trim();
+  draft.place = $('#f-place').value.trim();
+  draft.date = $('#f-date').value;
+  draft.info = $('#f-info').value.trim();
+  if(!draft.name){ $('#f-name').focus(); toast('Give the restaurant a name'); return; }
+  if(!draft.date){ $('#f-date').focus(); toast('Pick the date you eat there'); return; }
+  try{
+    await DB.upsertRestaurant(draft);
+    menu = await DB.loadMenu();
+    renderSetup(); toast('Restaurant saved ✓');
+  }catch(e){ console.error(e); toast('Could not save — are you signed in as organiser?'); }
+}
+
+/* ===========================================================
+   ADMIN — ALL ORDERS
+   =========================================================== */
+async function renderAllOrders(){
+  $('#ptitle').textContent = 'All orders';
+  const c = $('#content');
+  c.innerHTML = `<p class="eyebrow">Admin</p><p class="lead">Every member's order, grouped by restaurant. Use the summary to tell each venue how many of each dish to prepare.</p>`;
+  const orders = await DB.getAllOrders();
+  if(!orders.length){ c.appendChild(el(`<div class="card empty">No orders yet. Once members start ordering, they'll appear here.</div>`)); return; }
+
+  c.appendChild(el(`<button class="btn ghost sm" id="dl" style="margin-bottom:6px">⬇ Download full summary (.txt)</button>`));
+  $('#dl').onclick = ()=> downloadSummary(orders);
+
+  // group by restaurant in menu order, then any orphans
+  const order = menu.map(m=>m.id);
+  const groups = {};
+  orders.forEach(o=> (groups[o.restId]=groups[o.restId]||[]).push(o));
+  const ids = Object.keys(groups).sort((a,b)=>{
+    const ia=order.indexOf(a), ib=order.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib);
+  });
+
+  ids.forEach(restId=>{
+    const list = groups[restId];
+    const r = menu.find(m=>m.id===restId);
+    const name = r? r.name : (list[0].restName||'Removed restaurant');
+    const dp = dayParts(r? r.date : list[0].date);
+    c.appendChild(el(`<div class="ordhead"><h2>${esc(name)}</h2><span class="count">${dp.full||''} · ${list.length} order${list.length>1?'s':''}</span></div>`));
+
+    // aggregate tallies
+    const tally = {}; let total=0; const anyPrice = list.some(o=>o.items.some(i=>i.price));
+    list.forEach(o=>{ o.items.forEach(i=>{ tally[i.name]=(tally[i.name]||0)+i.qty; }); total+=o.total||0; });
+    const agg = el(`<div class="agg"><div class="ln" style="font-weight:700;color:var(--green)"><span>Kitchen summary</span><span></span></div>
+      ${Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([n,q])=>`<div class="ln"><span>${esc(n)}</span><span class="q">${q}</span></div>`).join('')}
+      ${anyPrice?`<div class="ln" style="font-weight:700"><span>Total value</span><span>${fmtMoney(total)}</span></div>`:''}
+    </div>`);
+    c.appendChild(agg);
+
+    // per-member
+    const box = el(`<div class="card"></div>`);
+    list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
+      box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b> — <span class="it">${o.items.map(i=>esc(i.name)).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
+    });
+    c.appendChild(box);
+  });
+}
+
+function downloadSummary(orders){
+  const order = menu.map(m=>m.id);
+  const groups={}; orders.forEach(o=> (groups[o.restId]=groups[o.restId]||[]).push(o));
+  const ids = Object.keys(groups).sort((a,b)=>{const ia=order.indexOf(a),ib=order.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});
+  let out = 'CHOIR CAPE TOUR — MEAL ORDERS\nGenerated '+new Date().toLocaleString('en-ZA')+'\n';
+  ids.forEach(id=>{
+    const list=groups[id]; const r=menu.find(m=>m.id===id);
+    const name=r?r.name:(list[0].restName||'Removed'); const dp=dayParts(r?r.date:list[0].date);
+    out += `\n========================================\n${name}  (${dp.full||'no date'})  —  ${list.length} orders\n========================================\n`;
+    const tally={}; let total=0;
+    list.forEach(o=>{o.items.forEach(i=>tally[i.name]=(tally[i.name]||0)+i.qty); total+=o.total||0;});
+    out += 'KITCHEN SUMMARY:\n';
+    Object.entries(tally).sort((a,b)=>b[1]-a[1]).forEach(([n,q])=> out+=`  ${q}x ${n}\n`);
+    if(total) out += `  TOTAL VALUE: ${fmtMoney(total)}\n`;
+    out += '\nPER MEMBER:\n';
+    list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
+      out += `  ${o.member}: ${o.items.map(i=>i.name).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
+    });
+  });
+  const blob = new Blob([out],{type:'text/plain'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='choir-tour-orders.txt'; a.click(); URL.revokeObjectURL(a.href);
+}
+
+/* ===========================================================
+   MODAL + TOAST
+   =========================================================== */
+function modal({icon,title,text,custom,actions}){
+  closeModal();
+  const scrim = el(`<div class="scrim"><div class="modal">
+    ${icon?`<div class="mk">${icon}</div>`:''}
+    <h3>${esc(title)}</h3>${text?`<p>${esc(text)}</p>`:''}
+    ${custom||''}
+    <div class="acts"></div></div></div>`);
+  const acts = scrim.querySelector('.acts');
+  (actions||[]).forEach(a=>{ const b=el(`<button class="${a.cls||'btn'}">${esc(a.label)}</button>`); b.onclick=()=>{ if(!a.keep) closeModal(); a.fn&&a.fn(); }; acts.appendChild(b); });
+  scrim.addEventListener('click',e=>{ if(e.target===scrim) closeModal(); });
+  document.body.appendChild(scrim);
+}
+function closeModal(){ const s=document.querySelector('.scrim'); if(s) s.remove(); }
+let toastT;
+function toast(msg){ const old=document.querySelector('.toast'); if(old) old.remove();
+  const t=el(`<div class="toast">${esc(msg)}</div>`); document.body.appendChild(t);
+  clearTimeout(toastT); toastT=setTimeout(()=>t.remove(),2600); }
+
+/* go */
+init();
