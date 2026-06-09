@@ -134,7 +134,8 @@ function renderOnboard(){
           <button class="linkbtn" id="ob-forgot" type="button">Forgot password?</button>
         </div>
         <button class="btn brass" id="ob-go">Log in</button>
-        <div class="note">First time? Enter your name, choose a unique member code, and create a password. Use the same member code + password to log in later.</div>
+        <button class="btn ghost" id="ob-create">Create account</button>
+        <div class="note">First time? Enter your name, choose a unique member code, then tap <b>Create account</b> once. Use <b>Log in</b> afterward.</div>
         <button class="adminlink" id="ob-admin">I'm the organiser — sign in</button>
         ${configured ? '' : '<div class="note">Supabase is not configured yet. Add your project URL and anon key in public/js/supabase-client.js, then refresh this page.</div>'}
       </div>
@@ -153,7 +154,16 @@ function renderOnboard(){
     });
   }
 
-  $('#ob-go').onclick = async ()=>{
+  const setAuthBusy = (busy, mode='login')=>{
+    const loginBtn = $('#ob-go');
+    const createBtn = $('#ob-create');
+    if(loginBtn) loginBtn.disabled = busy;
+    if(createBtn) createBtn.disabled = busy;
+    if(loginBtn) loginBtn.textContent = busy && mode==='login' ? 'Logging in…' : 'Log in';
+    if(createBtn) createBtn.textContent = busy && mode==='create' ? 'Creating…' : 'Create account';
+  };
+
+  const collectMemberAuthFields = ()=>{
     if(!DB.isConfigured()){ showSupabaseSetupHelp(); return; }
     const name = $('#ob-name').value.trim();
     const memberCode = $('#ob-code').value.trim();
@@ -163,10 +173,16 @@ function renderOnboard(){
     if(!password){ $('#ob-pass').focus(); return; }
     localStorage.setItem('memberName', name);
     localStorage.setItem('memberCode', normaliseMemberCode(memberCode));
-    const btn = $('#ob-go'); btn.disabled = true; btn.textContent = 'Logging in…';
-    try{ await DB.signInMember(name, memberCode, password); }   // applySession() renders on success
+    return { name, memberCode, password };
+  };
+
+  $('#ob-go').onclick = async ()=>{
+    const fields = collectMemberAuthFields();
+    if(!fields) return;
+    setAuthBusy(true, 'login');
+    try{ await DB.signInMember(fields.name, fields.memberCode, fields.password); }   // applySession() renders on success
     catch(e){
-      btn.disabled=false; btn.textContent='Log in';
+      setAuthBusy(false, 'login');
       if(isConfigError(e)) showSupabaseSetupHelp();
       else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_NAME)){
         $('#ob-name').focus();
@@ -176,17 +192,46 @@ function renderOnboard(){
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_PASSWORD)){
         toast('Password must be at least 6 characters');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS)){
-        toast('Wrong member code or password');
+        toast('Wrong member code or password. First time? Tap Create account.');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED)){
         toast('Disable "Confirm email" in Supabase Email provider for instant member login');
       } else if(String(e?.message||'').toLowerCase().includes('rate limit')){
-        toast('Too many account-creation attempts right now. Wait a few minutes, then try your member code + password again.');
+        toast('Too many login attempts right now. Wait a few minutes, then try again.');
       } else {
         toast('Could not connect — check your internet');
       }
       console.error(e);
     }
   };
+
+  $('#ob-create').onclick = async ()=>{
+    const fields = collectMemberAuthFields();
+    if(!fields) return;
+    setAuthBusy(true, 'create');
+    try{ await DB.createMemberAccount(fields.name, fields.memberCode, fields.password); }   // applySession() renders on success
+    catch(e){
+      setAuthBusy(false, 'create');
+      if(isConfigError(e)) showSupabaseSetupHelp();
+      else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_NAME)){
+        $('#ob-name').focus();
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_CODE)){
+        $('#ob-code').focus();
+        toast('Choose a member code (letters/numbers)');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_PASSWORD)){
+        toast('Password must be at least 6 characters');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.ACCOUNT_EXISTS)){
+        toast('That member code already exists. Use Log in or reset the password.');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED)){
+        toast('Disable "Confirm email" in Supabase Email provider for instant member login');
+      } else if(String(e?.message||'').toLowerCase().includes('rate limit')){
+        toast('Too many account-creation attempts right now. Wait a few minutes, then try Create account once.');
+      } else {
+        toast('Could not create account right now');
+      }
+      console.error(e);
+    }
+  };
+
   bindPasswordVisibility('#ob-show-pass', '#ob-pass');
   const forgot = $('#ob-forgot');
   if(forgot) forgot.onclick = ()=> showForgotPassword();

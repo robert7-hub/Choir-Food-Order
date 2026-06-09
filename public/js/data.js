@@ -5,13 +5,13 @@ const CONFIG_ERROR = 'supabase-not-configured';
 const ADMIN_USERNAME_DOMAIN = 'example.com';
 const MEMBER_USERNAME_DOMAIN = 'members.example.com';
 const MEMBER_RESET_RPC = 'admin_reset_member_password';
-const KNOWN_MEMBER_CODES_KEY = 'knownMemberCodes';
 
 export const MEMBER_AUTH_ERRORS = Object.freeze({
   INVALID_NAME: 'member-invalid-name',
   INVALID_CODE: 'member-invalid-code',
   INVALID_PASSWORD: 'member-invalid-password',
   INVALID_CREDENTIALS: 'member-invalid-credentials',
+  ACCOUNT_EXISTS: 'member-account-exists',
   EMAIL_CONFIRMATION_REQUIRED: 'member-email-confirmation-required'
 });
 
@@ -49,27 +49,6 @@ function adminLoginToEmail(login){
   const clean = normaliseAdminLogin(login);
   if(!clean) return '';
   return clean.includes('@') ? clean : `${clean}@${ADMIN_USERNAME_DOMAIN}`;
-}
-
-function knownMemberCodes(){
-  try{
-    const raw = localStorage.getItem(KNOWN_MEMBER_CODES_KEY);
-    const list = raw ? JSON.parse(raw) : [];
-    return new Set(Array.isArray(list) ? list.map(normaliseMemberCode).filter(Boolean) : []);
-  }catch(_e){
-    return new Set();
-  }
-}
-function rememberMemberCode(code){
-  const key = normaliseMemberCode(code);
-  if(!key) return;
-  try{
-    const known = knownMemberCodes();
-    known.add(key);
-    localStorage.setItem(KNOWN_MEMBER_CODES_KEY, JSON.stringify(Array.from(known).slice(0, 500)));
-  }catch(_e){
-    // Best-effort cache only.
-  }
 }
 
 function getClient(){
@@ -117,7 +96,6 @@ async function syncMemberProfile(user, displayName, memberCode){
 }
 
 /* ---------------- AUTH ---------------- */
-// Members sign in with name + password.
 // Members sign in with name + member code + password.
 // The member code is the unique login identity.
 export async function signInMember(name, memberCode, password){
@@ -139,19 +117,25 @@ export async function signInMember(name, memberCode, password){
       await client.auth.updateUser({ data: { display_name: displayName, member_code: code } });
     }
     await syncMemberProfile(signInData.user, displayName, code);
-    rememberMemberCode(code);
     return signInData.user;
   }
 
   const signInMsg = String(signInError?.message||'').toLowerCase();
   if(signInMsg.includes('email not confirmed')) throw new Error(MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED);
-  if(!isInvalidLoginMessage(signInMsg)) throw signInError;
+  if(isInvalidLoginMessage(signInMsg)) throw new Error(MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS);
+  throw signInError;
+}
 
-  // If this device has already seen this member code, avoid a second sign-up
-  // request on each failed login attempt (prevents auth rate-limit churn).
-  if(knownMemberCodes().has(code)){
-    throw new Error(MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS);
-  }
+export async function createMemberAccount(name, memberCode, password){
+  const client = getClient();
+  const displayName = String(name||'').trim();
+  const code = normaliseMemberCode(memberCode);
+  const pass = String(password||'');
+  const email = memberCodeToEmail(code);
+
+  if(!displayName) throw new Error(MEMBER_AUTH_ERRORS.INVALID_NAME);
+  if(!email) throw new Error(MEMBER_AUTH_ERRORS.INVALID_CODE);
+  if(pass.length < 6) throw new Error(MEMBER_AUTH_ERRORS.INVALID_PASSWORD);
 
   const { data: signUpData, error: signUpError } = await client.auth.signUp({
     email,
@@ -160,15 +144,13 @@ export async function signInMember(name, memberCode, password){
   });
   if(signUpError){
     const signUpMsg = String(signUpError.message||'').toLowerCase();
-    if(isAlreadyRegisteredMessage(signUpMsg) || isInvalidLoginMessage(signUpMsg)){
-      rememberMemberCode(code);
-      throw new Error(MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS);
+    if(isAlreadyRegisteredMessage(signUpMsg)){
+      throw new Error(MEMBER_AUTH_ERRORS.ACCOUNT_EXISTS);
     }
     throw signUpError;
   }
   if(signUpData?.session && signUpData?.user){
     await syncMemberProfile(signUpData.user, displayName, code);
-    rememberMemberCode(code);
     return signUpData.user;
   }
 

@@ -118,7 +118,7 @@ Then share the one link with all members. On a phone they can **Add to Home Scre
 
 ## How members and the organiser sign in
 
-- **Member:** opens the link → enters name + unique member code + password → **Log in**. If that member code has not been used before, an account is created automatically (use the same member code + password for future logins).
+- **Member:** opens the link → enters name + unique member code + password. First time, tap **Create account** once; after that, use **Log in** with the same member code + password.
 - **Organiser:** opens the link → **I'm the organiser — sign in** → username (or full email) + password from step 3.
 - **Forgot member password:** organiser signs in, then clicks **Reset member password** in the admin top bar, enters the member code and a new password, and the member can log in immediately with the new password.
 
