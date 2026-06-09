@@ -21,10 +21,35 @@ function dayParts(iso){
   if(isNaN(dt)) return {d:'–',m:''};
   return { d:String(dt.getDate()), m:dt.toLocaleString('en-ZA',{month:'short'}), full:dt.toLocaleDateString('en-ZA',{weekday:'long',day:'numeric',month:'long'}) };
 }
+function normaliseMemberCode(code){
+  return String(code||'')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .replace(/\.{2,}/g, '.')
+    .slice(0, 48);
+}
+function suggestMemberCode(name){
+  return normaliseMemberCode(name);
+}
 const CONFIG_ERR = 'supabase-not-configured';
 const isConfigError = (e)=>String(e?.message||'').includes(CONFIG_ERR);
 const isSchemaError = (e)=> e?.code==='PGRST205' || /could not find the table/i.test(String(e?.message||''));
 const isMemberAuthError = (e, code)=> String(e?.message||'') === code;
+
+function bindPasswordVisibility(toggleSelector, inputSelectors){
+  const toggle = $(toggleSelector);
+  const selectors = Array.isArray(inputSelectors) ? inputSelectors : [inputSelectors];
+  const targets = selectors.map(sel=>$(sel)).filter(Boolean);
+  if(!toggle || !targets.length) return;
+  const sync = ()=>{
+    const type = toggle.checked ? 'text' : 'password';
+    targets.forEach(target=>{ target.type = type; });
+  };
+  toggle.addEventListener('change', sync);
+  sync();
+}
 
 /* ---------- app state ---------- */
 let me = null;          // {name, slug, role:'member'|'admin'}
@@ -57,13 +82,17 @@ async function applySession(session){
       me = null;
       window.__rest = null;
       renderOnboard();
-      toast('Please sign in with your name and password.');
+      toast('Please sign in with your name, member code, and password.');
       return;
     }
     const memberName = DB.memberNameFromUser(session.user) || localStorage.getItem('memberName') || 'Member';
+    const memberCode = DB.memberCodeFromUser(session.user) || localStorage.getItem('memberCode') || '';
     const name = admin ? 'Organiser' : memberName;
-    if(!admin) localStorage.setItem('memberName', name);
-    me = { uid, name, role: admin ? 'admin' : 'member' };
+    if(!admin){
+      localStorage.setItem('memberName', name);
+      if(memberCode) localStorage.setItem('memberCode', memberCode);
+    }
+    me = { uid, name, memberCode, role: admin ? 'admin' : 'member' };
     menu = await DB.loadMenu();
     if(admin && (tab==='menu' || tab==='orders')) tab = 'setup';
     render();
@@ -84,6 +113,7 @@ function renderOnboard(){
   const app = $('#app');
   app.innerHTML = '';
   const saved = localStorage.getItem('memberName') || '';
+  const savedCode = localStorage.getItem('memberCode') || suggestMemberCode(saved);
   const configured = DB.isConfigured();
   const wrap = el(`
     <div class="onboard">
@@ -95,33 +125,58 @@ function renderOnboard(){
         </div>
         <label class="fld"><span>Your name and surname</span>
           <input id="ob-name" class="input" placeholder="e.g. Thabo Mokoena" autocomplete="name" value="${esc(saved)}"></label>
+        <label class="fld"><span>Member code (your login ID)</span>
+          <input id="ob-code" class="input" placeholder="e.g. thabo.mokoena or choir.24" autocomplete="username" value="${esc(savedCode)}"></label>
         <label class="fld"><span>Password</span>
           <input id="ob-pass" class="input" type="password" placeholder="At least 6 characters" autocomplete="current-password"></label>
+        <div class="authrow">
+          <label class="checkline"><input id="ob-show-pass" type="checkbox"><span>Show password</span></label>
+          <button class="linkbtn" id="ob-forgot" type="button">Forgot password?</button>
+        </div>
         <button class="btn brass" id="ob-go">Log in</button>
-        <div class="note">First time? Enter your name and create a password. Use the same details to log in later.</div>
+        <div class="note">First time? Enter your name, choose a unique member code, and create a password. Use the same member code + password to log in later.</div>
         <button class="adminlink" id="ob-admin">I'm the organiser — sign in</button>
         ${configured ? '' : '<div class="note">Supabase is not configured yet. Add your project URL and anon key in public/js/supabase-client.js, then refresh this page.</div>'}
       </div>
     </div>`);
   app.appendChild(wrap);
+
+  const nameInput = $('#ob-name');
+  const codeInput = $('#ob-code');
+  let codeManuallyEdited = !!savedCode;
+  if(nameInput && codeInput){
+    nameInput.addEventListener('input', ()=>{
+      if(!codeManuallyEdited) codeInput.value = suggestMemberCode(nameInput.value);
+    });
+    codeInput.addEventListener('input', ()=>{
+      codeManuallyEdited = true;
+    });
+  }
+
   $('#ob-go').onclick = async ()=>{
     if(!DB.isConfigured()){ showSupabaseSetupHelp(); return; }
     const name = $('#ob-name').value.trim();
+    const memberCode = $('#ob-code').value.trim();
     const password = ($('#ob-pass')||{}).value || '';
     if(!name){ $('#ob-name').focus(); return; }
+    if(!memberCode){ $('#ob-code').focus(); return; }
     if(!password){ $('#ob-pass').focus(); return; }
     localStorage.setItem('memberName', name);
+    localStorage.setItem('memberCode', normaliseMemberCode(memberCode));
     const btn = $('#ob-go'); btn.disabled = true; btn.textContent = 'Logging in…';
-    try{ await DB.signInMember(name, password); }   // applySession() renders on success
+    try{ await DB.signInMember(name, memberCode, password); }   // applySession() renders on success
     catch(e){
       btn.disabled=false; btn.textContent='Log in';
       if(isConfigError(e)) showSupabaseSetupHelp();
       else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_NAME)){
         $('#ob-name').focus();
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_CODE)){
+        $('#ob-code').focus();
+        toast('Choose a member code (letters/numbers)');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_PASSWORD)){
         toast('Password must be at least 6 characters');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS)){
-        toast('Wrong name or password');
+        toast('Wrong member code or password');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED)){
         toast('Disable "Confirm email" in Supabase Email provider for instant member login');
       } else if(String(e?.message||'').toLowerCase().includes('rate limit')){
@@ -132,11 +187,32 @@ function renderOnboard(){
       console.error(e);
     }
   };
-  ['#ob-name','#ob-pass'].forEach(sel=>{
+  bindPasswordVisibility('#ob-show-pass', '#ob-pass');
+  const forgot = $('#ob-forgot');
+  if(forgot) forgot.onclick = ()=> showForgotPassword();
+  ['#ob-name','#ob-code','#ob-pass'].forEach(sel=>{
     const input = $(sel);
     if(input) input.addEventListener('keydown',e=>{ if(e.key==='Enter') $('#ob-go').click(); });
   });
   $('#ob-admin').onclick = ()=> DB.isConfigured() ? askAdminLogin() : showSupabaseSetupHelp();
+}
+
+function showForgotPassword(){
+  modal({
+    icon:'🛟',
+    title:'Forgot your password?',
+    text:'For security, only the organiser can reset member passwords.',
+    custom:`<div class="note" style="text-align:left;margin:0">
+      1. Ask the organiser to sign in.<br>
+      2. In admin view, tap <b>Reset member password</b>.<br>
+      3. Share your <b>member code</b>, then set a new password.<br>
+      4. Log in with your name + member code + new password.
+    </div>`,
+    actions:[
+      {label:'Organiser sign in', cls:'btn brass', fn:()=>{ closeModal(); askAdminLogin(); }},
+      {label:'Close', cls:'btn ghost', fn:closeModal}
+    ]
+  });
 }
 
 function showSupabaseSetupHelp(){
@@ -157,11 +233,11 @@ function showSupabaseSetupHelp(){
 function showSchemaSetupHelp(){
   modal({
     icon:'🧱',
-    title:'Set up database tables',
-    text:'Supabase auth works, but this project is missing the required tables.',
+    title:'Set up database functions/tables',
+    text:'Supabase auth works, but this project is missing required SQL objects.',
     custom:`<div class="note" style="text-align:left;margin:0">
       1. Open supabase/schema.sql in this project<br>
-      2. Paste it into Supabase SQL Editor and run it once<br>
+      2. Paste it into Supabase SQL Editor and run the whole file<br>
       3. In Auth Providers, enable Email sign-ins and disable Confirm email<br>
       4. Refresh this page
     </div>`,
@@ -173,7 +249,8 @@ function askAdminLogin(){
   modal({
     icon:'🔑', title:'Organiser sign in', text:'Sign in with your organiser username and password to manage the menu and view everyone\'s orders.',
     custom:`<label class="fld" style="text-align:left"><span>Username (or email)</span><input id="ad-login" class="input" autocomplete="username" placeholder="e.g. organiser or you@example.com"></label>
-            <label class="fld" style="text-align:left"><span>Password</span><input id="ad-pass" class="input" type="password" autocomplete="current-password"></label>`,
+            <label class="fld" style="text-align:left"><span>Password</span><input id="ad-pass" class="input" type="password" autocomplete="current-password"></label>
+            <div class="authrow"><label class="checkline"><input id="ad-show-pass" type="checkbox"><span>Show password</span></label></div>`,
     actions:[
       {label:'Sign in', cls:'btn brass', keep:true, fn:async ()=>{
         const login=($('#ad-login')||{}).value, pass=($('#ad-pass')||{}).value;
@@ -191,6 +268,7 @@ function askAdminLogin(){
       {label:'Cancel', cls:'btn ghost', fn:closeModal}
     ]
   });
+  bindPasswordVisibility('#ad-show-pass', '#ad-pass');
   setTimeout(()=>{ const e=$('#ad-login'); if(e) e.focus(); },50);
 }
 
@@ -215,9 +293,12 @@ function render(){
         <div class="railfoot"><button id="signout">${isAdmin?'Exit admin':'Switch user'}</button></div>
       </nav>
       <div class="main">
-        <div class="topbar ${isAdmin?'':''}">
+        <div class="topbar">
           <h1 id="ptitle"></h1>
-          <div class="who">${isAdmin?'Admin':'Hi'} <b>${esc(isAdmin?'Organiser':me.name)}</b></div>
+          <div class="topbar-actions">
+            ${isAdmin?'<button class="btn ghost sm" id="admin-reset-pass">Reset member password</button>':''}
+            <div class="who">${isAdmin?'Admin':'Hi'} <b>${esc(isAdmin?'Organiser':me.name)}</b></div>
+          </div>
         </div>
         <div class="content" id="content"></div>
       </div>
@@ -225,6 +306,10 @@ function render(){
   app.appendChild(shell);
   shell.querySelectorAll('.navbtn').forEach(b=> b.onclick = ()=>{ tab=b.dataset.tab; render(); });
   $('#signout').onclick = ()=> confirmSignout();
+  if(isAdmin){
+    const reset = $('#admin-reset-pass');
+    if(reset) reset.onclick = ()=> askAdminPasswordReset();
+  }
 
   if(isAdmin){ tab==='all' ? renderAllOrders() : renderSetup(); }
   else { tab==='orders' ? renderMyOrders() : (window.__rest ? renderRestaurant(window.__rest) : renderMenu()); }
@@ -233,11 +318,112 @@ function render(){
 function confirmSignout(){
   const admin = me.role==='admin';
   modal({ icon: admin?'🚪':'👤', title: admin?'Exit admin?':'Switch user?',
-    text: admin?'You\'ll return to the member sign-in screen.':'Your saved orders stay safe. Use your name and password to log in again later.',
+    text: admin?'You\'ll return to the member sign-in screen.':'Your saved orders stay safe. Use your member code and password to log in again later.',
     actions:[
       {label:'Yes', cls:'btn', fn:async ()=>{ window.__rest=null; closeModal(); await DB.signOutAll(); }},
       {label:'Stay', cls:'btn ghost', fn:closeModal}
     ]});
+}
+
+function askAdminPasswordReset(prefillName=''){
+  if(me?.role !== 'admin'){
+    modal({
+      icon:'🔒',
+      title:'Organiser access required',
+      text:'Only organiser accounts can reset member passwords.',
+      actions:[
+        {label:'Organiser sign in', cls:'btn brass', fn:()=>{ closeModal(); askAdminLogin(); }},
+        {label:'Close', cls:'btn ghost', fn:closeModal}
+      ]
+    });
+    return;
+  }
+
+  const suggestedName = String(prefillName || '').trim();
+  let busy = false;
+  modal({
+    icon:'🔐',
+    title:'Reset member password',
+    text:'Set a new password for a member who forgot theirs.',
+    custom:`<label class="fld" style="text-align:left"><span>Member code</span><input id="rp-code" class="input" autocomplete="username" value="${esc(suggestedName)}" placeholder="e.g. thabo.mokoena or choir.24"></label>
+            <label class="fld" style="text-align:left"><span>New password</span><input id="rp-pass" class="input" type="password" autocomplete="new-password" placeholder="At least 6 characters"></label>
+            <label class="fld" style="text-align:left"><span>Confirm new password</span><input id="rp-pass-confirm" class="input" type="password" autocomplete="new-password" placeholder="Re-enter the password"></label>
+            <div class="authrow"><label class="checkline"><input id="rp-show-pass" type="checkbox"><span>Show passwords</span></label></div>`,
+    actions:[
+      {label:'Reset password', cls:'btn brass', keep:true, fn:async ()=>{
+        if(busy) return;
+        const memberCode = String(($('#rp-code')||{}).value || '').trim();
+        const pass = String(($('#rp-pass')||{}).value || '');
+        const pass2 = String(($('#rp-pass-confirm')||{}).value || '');
+
+        if(!memberCode){
+          const n = $('#rp-code');
+          if(n) n.focus();
+          toast('Enter the member code first');
+          return;
+        }
+        if(pass.length < 6){
+          const n = $('#rp-pass');
+          if(n) n.focus();
+          toast('Password must be at least 6 characters');
+          return;
+        }
+        if(pass !== pass2){
+          const n = $('#rp-pass-confirm');
+          if(n) n.focus();
+          toast('Passwords do not match');
+          return;
+        }
+
+        busy = true;
+        const btn = document.querySelector('.scrim .btn.brass');
+        if(btn){ btn.disabled = true; btn.textContent = 'Resetting…'; }
+        try{
+          await DB.resetMemberPassword(memberCode, pass);
+          closeModal();
+          toast(`Password reset for ${memberCode}`);
+        }catch(e){
+          if(isConfigError(e)){ closeModal(); showSupabaseSetupHelp(); return; }
+          if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_CODE)){
+            const n = $('#rp-code');
+            if(n) n.focus();
+            toast('Use a valid member code');
+            return;
+          }
+          if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_PASSWORD)){
+            const n = $('#rp-pass');
+            if(n) n.focus();
+            toast('Password must be at least 6 characters');
+            return;
+          }
+          if(String(e?.message||'') === DB.MEMBER_RESET_ERRORS.MEMBER_NOT_FOUND){
+            const n = $('#rp-code');
+            if(n) n.focus();
+            toast('No member account found for that code');
+            return;
+          }
+          if(String(e?.message||'') === DB.MEMBER_RESET_ERRORS.NOT_AUTHORIZED){
+            toast('Only organiser accounts can reset passwords');
+            return;
+          }
+          if(String(e?.message||'') === DB.MEMBER_RESET_ERRORS.RESET_NOT_AVAILABLE){
+            closeModal();
+            showSchemaSetupHelp();
+            return;
+          }
+          toast('Could not reset password right now');
+          console.error(e);
+        }finally{
+          busy = false;
+          const activeBtn = document.querySelector('.scrim .btn.brass');
+          if(activeBtn){ activeBtn.disabled = false; activeBtn.textContent = 'Reset password'; }
+        }
+      }},
+      {label:'Cancel', cls:'btn ghost', fn:closeModal}
+    ]
+  });
+  bindPasswordVisibility('#rp-show-pass', ['#rp-pass', '#rp-pass-confirm']);
+  setTimeout(()=>{ const n=$('#rp-code'); if(n) n.focus(); },50);
 }
 
 /* ===========================================================
@@ -396,6 +582,7 @@ async function saveOrder(r){
   const {lines,total} = cartLines(r);
   const order = {
     uid: me.uid, member: me.name,
+    memberCode: me.memberCode || '',
     restId: r.id, restName: r.name, place: r.place||'', date: r.date||'',
     items: lines, total, placedAt: new Date().toISOString()
   };
@@ -610,7 +797,7 @@ async function renderAllOrders(){
     // per-member
     const box = el(`<div class="card"></div>`);
     list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
-      box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b> — <span class="it">${o.items.map(i=>esc(i.name)).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
+      box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b>${o.memberCode?` <span class="it">(${esc(o.memberCode)})</span>`:''} — <span class="it">${o.items.map(i=>esc(i.name)).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
     });
     c.appendChild(box);
   });
@@ -632,7 +819,7 @@ function downloadSummary(orders){
     if(total) out += `  TOTAL VALUE: ${fmtMoney(total)}\n`;
     out += '\nPER MEMBER:\n';
     list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
-      out += `  ${o.member}: ${o.items.map(i=>i.name).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
+      out += `  ${o.member}${o.memberCode?` (${o.memberCode})`:''}: ${o.items.map(i=>i.name).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
     });
   });
   const blob = new Blob([out],{type:'text/plain'});

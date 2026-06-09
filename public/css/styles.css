@@ -57,7 +57,8 @@
     position:sticky;top:0;z-index:5
   }
   .topbar h1{font-family:var(--serif);font-size:21px;margin:0;font-weight:600}
-  .topbar .who{margin-left:auto;font-size:13px;color:var(--muted)}
+  .topbar-actions{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .topbar .who{font-size:13px;color:var(--muted)}
   .topbar .who b{color:var(--green)}
   .pageadmin{background:#2a2a2a}
   .content{padding:20px;max-width:760px;width:100%;margin:0 auto;flex:1}
@@ -104,6 +105,11 @@
   .input{width:100%;padding:12px;border:1.5px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
   .input:focus{outline:none;border-color:var(--brass)}
   textarea.input{min-height:64px;resize:vertical}
+  .authrow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:-4px 0 10px}
+  .checkline{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);cursor:pointer}
+  .checkline input{width:16px;height:16px;margin:0;accent-color:var(--green)}
+  .linkbtn{background:none;border:0;padding:0;color:var(--green);font-size:12.5px;font-weight:700;cursor:pointer}
+  .linkbtn:hover{color:var(--green-d);text-decoration:underline}
 
   /* menu item row with stepper */
   .item{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--line)}

@@ -21,6 +21,7 @@ create table if not exists public.orders (
   id          uuid primary key default gen_random_uuid(),
   member_uid  uuid not null references auth.users(id) on delete cascade,
   member_name text not null,
+  member_code text,
   rest_id     text not null,
   rest_name   text,
   place       text,
@@ -30,9 +31,18 @@ create table if not exists public.orders (
   placed_at   timestamptz default now(),
   unique (member_uid, rest_id)               -- one final order per member per stop
 );
+alter table public.orders add column if not exists member_code text;
 
 create table if not exists public.admins (
   uid uuid primary key references auth.users(id) on delete cascade
+);
+
+create table if not exists public.member_profiles (
+  uid          uuid primary key references auth.users(id) on delete cascade,
+  member_code  text unique not null,
+  display_name text not null,
+  created_at   timestamptz default now(),
+  updated_at   timestamptz default now()
 );
 
 -- ---------- ADMIN HELPER ----------
@@ -44,10 +54,91 @@ $$;
 revoke all on function public.is_admin() from public;
 grant execute on function public.is_admin() to authenticated;
 
+-- ---------- MEMBER PASSWORD HELPERS ----------
+create or replace function public.member_code_to_email(p_code text)
+returns text
+language sql
+immutable
+set search_path = public
+as $$
+  with cleaned as (
+    select left(
+      regexp_replace(
+        trim(both '.' from regexp_replace(lower(trim(coalesce(p_code, ''))), '[^a-z0-9]+', '.', 'g')),
+        '\.{2,}', '.', 'g'
+      ),
+      48
+    ) as key
+  )
+  select case when key = '' then null else key || '@members.example.com' end
+  from cleaned;
+$$;
+revoke all on function public.member_code_to_email(text) from public;
+grant execute on function public.member_code_to_email(text) to authenticated;
+
+-- Backward-compatible wrapper used by older clients.
+create or replace function public.member_name_to_email(p_name text)
+returns text
+language sql
+immutable
+set search_path = public
+as $$
+  select public.member_code_to_email(p_name);
+$$;
+revoke all on function public.member_name_to_email(text) from public;
+grant execute on function public.member_name_to_email(text) to authenticated;
+
+-- Organiser-only RPC: reset a member's password by member code.
+create or replace function public.admin_reset_member_password(
+  p_member_code text,
+  p_new_password text
+)
+returns void
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_email text;
+  v_user_id uuid;
+begin
+  if not public.is_admin() then
+    raise exception 'not-authorized';
+  end if;
+
+  if p_new_password is null or length(p_new_password) < 6 then
+    raise exception 'password-too-short';
+  end if;
+
+  v_email := public.member_code_to_email(p_member_code);
+  if v_email is null then
+    raise exception 'member-code-invalid';
+  end if;
+
+  select u.id into v_user_id
+  from auth.users u
+  where lower(u.email) = lower(v_email)
+  order by u.created_at desc
+  limit 1;
+
+  if v_user_id is null then
+    raise exception 'member-not-found';
+  end if;
+
+  perform auth.admin_update_user_by_id(
+    v_user_id,
+    jsonb_build_object('password', p_new_password)
+  );
+end;
+$$;
+revoke all on function public.admin_reset_member_password(text, text) from public;
+grant execute on function public.admin_reset_member_password(text, text) to authenticated;
+
 -- ---------- ENABLE RLS ----------
 alter table public.restaurants enable row level security;
 alter table public.orders      enable row level security;
 alter table public.admins      enable row level security;
+alter table public.member_profiles enable row level security;
 
 -- ---------- RESTAURANTS: anyone signed in reads; only admin writes ----------
 drop policy if exists r_select    on public.restaurants;
@@ -70,6 +161,14 @@ create policy o_select on public.orders for select to authenticated using (membe
 drop policy if exists a_select on public.admins;
 create policy a_select on public.admins for select to authenticated using (uid = auth.uid() or public.is_admin());
 -- (no client insert/update/delete — you add organisers from the dashboard)
+
+-- ---------- MEMBER PROFILES: own row for member; all rows for admin ----------
+drop policy if exists mp_select on public.member_profiles;
+drop policy if exists mp_insert on public.member_profiles;
+drop policy if exists mp_update on public.member_profiles;
+create policy mp_select on public.member_profiles for select to authenticated using (uid = auth.uid() or public.is_admin());
+create policy mp_insert on public.member_profiles for insert to authenticated with check (uid = auth.uid() or public.is_admin());
+create policy mp_update on public.member_profiles for update to authenticated using (uid = auth.uid() or public.is_admin()) with check (uid = auth.uid() or public.is_admin());
 
 -- ---------- OPTIONAL MENU SEED: LA GRAPPERIA ----------
 insert into public.restaurants (

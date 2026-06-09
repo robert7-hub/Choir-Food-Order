@@ -4,16 +4,24 @@ import { supabase, isSupabaseConfigured } from './supabase-client.js';
 const CONFIG_ERROR = 'supabase-not-configured';
 const ADMIN_USERNAME_DOMAIN = 'example.com';
 const MEMBER_USERNAME_DOMAIN = 'members.example.com';
+const MEMBER_RESET_RPC = 'admin_reset_member_password';
 
 export const MEMBER_AUTH_ERRORS = Object.freeze({
   INVALID_NAME: 'member-invalid-name',
+  INVALID_CODE: 'member-invalid-code',
   INVALID_PASSWORD: 'member-invalid-password',
   INVALID_CREDENTIALS: 'member-invalid-credentials',
   EMAIL_CONFIRMATION_REQUIRED: 'member-email-confirmation-required'
 });
 
-function normaliseMemberName(name){
-  return String(name||'')
+export const MEMBER_RESET_ERRORS = Object.freeze({
+  MEMBER_NOT_FOUND: 'member-reset-member-not-found',
+  NOT_AUTHORIZED: 'member-reset-not-authorized',
+  RESET_NOT_AVAILABLE: 'member-reset-not-available'
+});
+
+function normaliseMemberCode(code){
+  return String(code||'')
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9]+/g, '.')
@@ -21,8 +29,8 @@ function normaliseMemberName(name){
     .replace(/\.{2,}/g, '.')
     .slice(0, 48);
 }
-function memberNameToEmail(name){
-  const key = normaliseMemberName(name);
+function memberCodeToEmail(code){
+  const key = normaliseMemberCode(code);
   if(!key) return '';
   return `${key}@${MEMBER_USERNAME_DOMAIN}`;
 }
@@ -64,24 +72,51 @@ export function memberNameFromUser(user){
   return '';
 }
 
+export function memberCodeFromUser(user){
+  const metaCode = normaliseMemberCode(user?.user_metadata?.member_code||'');
+  if(metaCode) return metaCode;
+  const email = String(user?.email||'').trim().toLowerCase();
+  const suffix = `@${MEMBER_USERNAME_DOMAIN}`;
+  if(email.endsWith(suffix)) return email.slice(0, -suffix.length);
+  return '';
+}
+
+async function syncMemberProfile(user, displayName, memberCode){
+  if(!user?.id || !memberCode) return;
+  const client = getClient();
+  const payload = {
+    uid: user.id,
+    member_code: memberCode,
+    display_name: displayName || memberNameFromUser(user) || memberCode
+  };
+  const { error } = await client.from('member_profiles').upsert(payload);
+  // Keep auth working even if the optional profile table is not deployed yet.
+  if(error && error.code !== 'PGRST205') console.error(error);
+}
+
 /* ---------------- AUTH ---------------- */
 // Members sign in with name + password.
-// We derive a stable synthetic email from the member name.
-export async function signInMember(name, password){
+// Members sign in with name + member code + password.
+// The member code is the unique login identity.
+export async function signInMember(name, memberCode, password){
   const client = getClient();
   const displayName = String(name||'').trim();
+  const code = normaliseMemberCode(memberCode);
   const pass = String(password||'');
-  const email = memberNameToEmail(displayName);
+  const email = memberCodeToEmail(code);
 
-  if(!email) throw new Error(MEMBER_AUTH_ERRORS.INVALID_NAME);
+  if(!displayName) throw new Error(MEMBER_AUTH_ERRORS.INVALID_NAME);
+  if(!email) throw new Error(MEMBER_AUTH_ERRORS.INVALID_CODE);
   if(pass.length < 6) throw new Error(MEMBER_AUTH_ERRORS.INVALID_PASSWORD);
 
   const { data: signInData, error: signInError } = await client.auth.signInWithPassword({ email, password: pass });
   if(!signInError && signInData?.user){
     const currentName = String(signInData.user.user_metadata?.display_name||'').trim();
-    if(displayName && currentName !== displayName){
-      await client.auth.updateUser({ data: { display_name: displayName } });
+    const currentCode = normaliseMemberCode(signInData.user.user_metadata?.member_code||'');
+    if(displayName !== currentName || code !== currentCode){
+      await client.auth.updateUser({ data: { display_name: displayName, member_code: code } });
     }
+    await syncMemberProfile(signInData.user, displayName, code);
     return signInData.user;
   }
 
@@ -92,7 +127,7 @@ export async function signInMember(name, password){
   const { data: signUpData, error: signUpError } = await client.auth.signUp({
     email,
     password: pass,
-    options: { data: { display_name: displayName } }
+    options: { data: { display_name: displayName, member_code: code } }
   });
   if(signUpError){
     const signUpMsg = String(signUpError.message||'').toLowerCase();
@@ -101,9 +136,38 @@ export async function signInMember(name, password){
     }
     throw signUpError;
   }
-  if(signUpData?.session && signUpData?.user) return signUpData.user;
+  if(signUpData?.session && signUpData?.user){
+    await syncMemberProfile(signUpData.user, displayName, code);
+    return signUpData.user;
+  }
 
   throw new Error(MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED);
+}
+
+export async function resetMemberPassword(memberCode, newPassword){
+  const client = getClient();
+  const code = normaliseMemberCode(memberCode);
+  const pass = String(newPassword||'');
+  const email = memberCodeToEmail(code);
+
+  if(!email) throw new Error(MEMBER_AUTH_ERRORS.INVALID_CODE);
+  if(pass.length < 6) throw new Error(MEMBER_AUTH_ERRORS.INVALID_PASSWORD);
+
+  const { error } = await client.rpc(MEMBER_RESET_RPC, {
+    p_member_code: code,
+    p_new_password: pass
+  });
+  if(!error) return;
+
+  const msg = String(error.message||'').toLowerCase();
+  if(msg.includes('member-not-found')) throw new Error(MEMBER_RESET_ERRORS.MEMBER_NOT_FOUND);
+  if(msg.includes('not-authorized')) throw new Error(MEMBER_RESET_ERRORS.NOT_AUTHORIZED);
+  if(msg.includes('member-code-invalid')) throw new Error(MEMBER_AUTH_ERRORS.INVALID_CODE);
+  if(msg.includes('password-too-short')) throw new Error(MEMBER_AUTH_ERRORS.INVALID_PASSWORD);
+  if(error.code === 'PGRST202' || msg.includes(MEMBER_RESET_RPC)){
+    throw new Error(MEMBER_RESET_ERRORS.RESET_NOT_AVAILABLE);
+  }
+  throw error;
 }
 // Organiser signs in with username + password.
 // If a full email is supplied, that is used directly.
@@ -173,7 +237,7 @@ export async function placeOrder(o){
   const client = getClient();
   // insert-only: the database has no update/delete policy, so an order is final.
   const { error } = await client.from('orders').insert({
-    member_uid:o.uid, member_name:o.member,
+    member_uid:o.uid, member_name:o.member, member_code:o.memberCode||null,
     rest_id:o.restId, rest_name:o.restName, place:o.place||null, date:o.date||null,
     items:o.items, total:o.total, placed_at:o.placedAt || new Date().toISOString()
   });
@@ -193,7 +257,7 @@ export async function getAllOrders(){
 }
 function mapOrder(r){
   return {
-    uid:r.member_uid, member:r.member_name, restId:r.rest_id, restName:r.rest_name,
+    uid:r.member_uid, member:r.member_name, memberCode:r.member_code||'', restId:r.rest_id, restName:r.rest_name,
     place:r.place||'', date:r.date||'', items:r.items||[], total:Number(r.total||0), placedAt:r.placed_at
   };
 }
