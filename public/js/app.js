@@ -1,5 +1,5 @@
 // Choir Tour Meals — UI. Data + auth come from data.js (Supabase).
-import * as DB from './data.js';
+import * as DB from './data.js?v=20260610.1';
 
 /* ===========================================================
    CHOIR TOUR MEALS
