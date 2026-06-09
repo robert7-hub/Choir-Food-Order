@@ -133,8 +133,10 @@ function renderOnboard(){
           <label class="checkline"><input id="ob-show-pass" type="checkbox"><span>Show password</span></label>
           <button class="linkbtn" id="ob-forgot" type="button">Forgot password?</button>
         </div>
-        <button class="btn brass" id="ob-go">Log in</button>
-        <button class="btn ghost" id="ob-create">Create account</button>
+        <div class="authactions">
+          <button class="btn brass" id="ob-go">Log in</button>
+          <button class="btn ghost" id="ob-create">Create account</button>
+        </div>
         <div class="note">First time? Enter your name, choose a unique member code, then tap <b>Create account</b> once. Use <b>Log in</b> afterward.</div>
         <button class="adminlink" id="ob-admin">I'm the organiser — sign in</button>
         ${configured ? '' : '<div class="note">Supabase is not configured yet. Add your project URL and anon key in public/js/supabase-client.js, then refresh this page.</div>'}
