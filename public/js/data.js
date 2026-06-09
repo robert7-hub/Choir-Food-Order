@@ -5,6 +5,7 @@ const CONFIG_ERROR = 'supabase-not-configured';
 const ADMIN_USERNAME_DOMAIN = 'example.com';
 const MEMBER_USERNAME_DOMAIN = 'members.example.com';
 const MEMBER_RESET_RPC = 'admin_reset_member_password';
+const KNOWN_MEMBER_CODES_KEY = 'knownMemberCodes';
 
 export const MEMBER_AUTH_ERRORS = Object.freeze({
   INVALID_NAME: 'member-invalid-name',
@@ -48,6 +49,27 @@ function adminLoginToEmail(login){
   const clean = normaliseAdminLogin(login);
   if(!clean) return '';
   return clean.includes('@') ? clean : `${clean}@${ADMIN_USERNAME_DOMAIN}`;
+}
+
+function knownMemberCodes(){
+  try{
+    const raw = localStorage.getItem(KNOWN_MEMBER_CODES_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return new Set(Array.isArray(list) ? list.map(normaliseMemberCode).filter(Boolean) : []);
+  }catch(_e){
+    return new Set();
+  }
+}
+function rememberMemberCode(code){
+  const key = normaliseMemberCode(code);
+  if(!key) return;
+  try{
+    const known = knownMemberCodes();
+    known.add(key);
+    localStorage.setItem(KNOWN_MEMBER_CODES_KEY, JSON.stringify(Array.from(known).slice(0, 500)));
+  }catch(_e){
+    // Best-effort cache only.
+  }
 }
 
 function getClient(){
@@ -117,12 +139,19 @@ export async function signInMember(name, memberCode, password){
       await client.auth.updateUser({ data: { display_name: displayName, member_code: code } });
     }
     await syncMemberProfile(signInData.user, displayName, code);
+    rememberMemberCode(code);
     return signInData.user;
   }
 
   const signInMsg = String(signInError?.message||'').toLowerCase();
   if(signInMsg.includes('email not confirmed')) throw new Error(MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED);
   if(!isInvalidLoginMessage(signInMsg)) throw signInError;
+
+  // If this device has already seen this member code, avoid a second sign-up
+  // request on each failed login attempt (prevents auth rate-limit churn).
+  if(knownMemberCodes().has(code)){
+    throw new Error(MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS);
+  }
 
   const { data: signUpData, error: signUpError } = await client.auth.signUp({
     email,
@@ -132,12 +161,14 @@ export async function signInMember(name, memberCode, password){
   if(signUpError){
     const signUpMsg = String(signUpError.message||'').toLowerCase();
     if(isAlreadyRegisteredMessage(signUpMsg) || isInvalidLoginMessage(signUpMsg)){
+      rememberMemberCode(code);
       throw new Error(MEMBER_AUTH_ERRORS.INVALID_CREDENTIALS);
     }
     throw signUpError;
   }
   if(signUpData?.session && signUpData?.user){
     await syncMemberProfile(signUpData.user, displayName, code);
+    rememberMemberCode(code);
     return signUpData.user;
   }
 

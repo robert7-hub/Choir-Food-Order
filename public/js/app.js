@@ -180,7 +180,7 @@ function renderOnboard(){
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED)){
         toast('Disable "Confirm email" in Supabase Email provider for instant member login');
       } else if(String(e?.message||'').toLowerCase().includes('rate limit')){
-        toast('Too many sign-up attempts right now. Please wait a few minutes and try again.');
+        toast('Too many account-creation attempts right now. Wait a few minutes, then try your member code + password again.');
       } else {
         toast('Could not connect — check your internet');
       }
