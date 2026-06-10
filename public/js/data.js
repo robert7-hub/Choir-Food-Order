@@ -113,12 +113,7 @@ export async function signInMember(name, memberCode, password){
 
   const { data: signInData, error: signInError } = await client.auth.signInWithPassword({ email, password: pass });
   if(!signInError && signInData?.user){
-    const currentName = String(signInData.user.user_metadata?.display_name||'').trim();
-    const currentCode = normaliseMemberCode(signInData.user.user_metadata?.member_code||'');
-    if(displayName !== currentName || code !== currentCode){
-      await client.auth.updateUser({ data: { display_name: displayName, member_code: code } });
-    }
-    await syncMemberProfile(signInData.user, displayName, code);
+    // Name and code are fixed at registration — never overwrite them on login.
     return signInData.user;
   }
 
