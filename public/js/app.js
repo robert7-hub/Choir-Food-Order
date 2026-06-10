@@ -891,16 +891,14 @@ function optionAdder(kind){
   const cancelBtn=box.querySelector('.cancel-btn');
 
   const editor = { kind, nameI, typeI, priceI, descI, addBtn, cancelBtn, editingId:null };
-  editor.reset = (focus=false, clearFields=false)=>{
+  editor.reset = (focus=false)=>{
     editor.editingId = null;
+    nameI.value = '';
+    typeI.value = '';
+    priceI.value = '';
+    descI.value = '';
     addBtn.textContent = 'Add';
     cancelBtn.style.display = 'none';
-    if(clearFields){
-      nameI.value = '';
-      typeI.value = '';
-      priceI.value = '';
-      descI.value = '';
-    }
     if(focus) nameI.focus();
   };
   editor.beginEdit = (item)=>{
@@ -936,7 +934,7 @@ function optionAdder(kind){
   };
 
   addBtn.onclick = saveOption;
-  cancelBtn.onclick = ()=> editor.reset(true, false);
+  cancelBtn.onclick = ()=> editor.reset(true);
   [nameI,typeI,priceI,descI].forEach(i=> i.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); saveOption(); } }));
   optionEditors[kind] = editor;
   return box;
@@ -969,7 +967,7 @@ function optionBulkImporter(kind){
       return;
     }
     draft[kind].push(...items);
-    optionEditors[kind]?.reset(false, true);
+    optionEditors[kind]?.reset();
     drawOptions();
     textI.value = '';
     toast(`Imported ${items.length} ${foodMode?'food option':'drink option'}${items.length===1?'':'s'}`);
@@ -998,7 +996,7 @@ function drawOptions(){
       btns[0].onclick=()=> optionEditors[kind]?.beginEdit(it);
       btns[1].onclick=()=>{
         draft[kind]=draft[kind].filter(x=>x.id!==it.id);
-        if(optionEditors[kind]?.editingId===it.id) optionEditors[kind].reset(false, true);
+        if(optionEditors[kind]?.editingId===it.id) optionEditors[kind].reset();
         drawOptions();
       };
       box.appendChild(row);
