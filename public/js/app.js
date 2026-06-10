@@ -941,12 +941,15 @@ function optionAdder(kind){
 }
 function optionBulkImporter(kind){
   const foodMode = kind==='food';
+  const placeholder = foodMode
+    ? 'Pizza - Margherita (R145)\nFior di Latte Mozzarella, Napoletana Sauce, Fresh Basil'
+    : 'Drink - Coke (R35)\nSoft Drink';
   const box = el(`<div class="card">
     <label class="fld" style="margin:0">
       <span>Paste a ${foodMode?'food':'drink'} list</span>
-      <textarea class="input bulk-text" placeholder="${foodMode?'Pizza - Margherita (R145)\nFior di Latte Mozzarella, Napoletana Sauce, Fresh Basil':'Drink - Sparkling Water (R30)\n500ml bottle'}"></textarea>
+      <textarea class="input bulk-text" placeholder="${placeholder}"></textarea>
     </label>
-    <div class="empty" style="padding:0 0 10px">Paste one option per block. I’ll read lines like “Pizza - Margherita (R145)” and use the next line as the description.</div>
+    <div class="empty" style="padding:0 0 10px">Paste one option per block. I’ll read lines like “${foodMode?'Pizza - Margherita (R145)':'Drink - Coke (R35)'}” and use the next line as the description.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn ghost sm import-btn" style="width:auto">Import pasted list</button>
       <button class="btn ghost sm clear-btn" style="width:auto">Clear box</button>
