@@ -33,6 +33,14 @@ create table if not exists public.orders (
 );
 alter table public.orders add column if not exists member_code text;
 
+-- Cascade-delete orders when their restaurant is removed.
+-- Clean up any orphaned orders first so the FK can be added safely.
+delete from public.orders where rest_id not in (select id from public.restaurants);
+alter table public.orders drop constraint if exists orders_rest_id_fkey;
+alter table public.orders
+  add constraint orders_rest_id_fkey
+  foreign key (rest_id) references public.restaurants(id) on delete cascade;
+
 create table if not exists public.admins (
   uid uuid primary key references auth.users(id) on delete cascade
 );
@@ -228,3 +236,80 @@ on conflict (uid) do nothing;
 --  4. Verify the row exists:
 select * from public.admins where uid = 'd64b9330-4df7-4497-826b-96d2052d2afa';
 -- =====================================================================
+
+-- ---------- PRE-APPROVED MEMBER CODES ----------
+create table if not exists public.allowed_member_codes (
+  code        text primary key,   -- normalised the same way as member_profiles.member_code
+  claimed_uid uuid references auth.users(id) on delete set null,
+  added_at    timestamptz default now()
+);
+
+alter table public.allowed_member_codes enable row level security;
+
+-- Admins can read/write the list; members cannot see it.
+drop policy if exists amc_admin on public.allowed_member_codes;
+create policy amc_admin on public.allowed_member_codes
+  for all to authenticated
+  using (public.is_admin())
+  with check (public.is_admin());
+
+-- Called BEFORE sign-up (anon role) — checks if a code is on the list and unclaimed.
+-- Returns 'allowed' | 'not-found' | 'already-claimed'
+create or replace function public.check_member_code_allowed(p_code text)
+returns text
+language plpgsql
+security definer
+stable
+set search_path = public
+as $$
+declare
+  v_code text;
+  v_uid  uuid;
+begin
+  v_code := lower(trim(coalesce(p_code, '')));
+  v_code := regexp_replace(v_code, '[^a-z0-9]+', '.', 'g');
+  v_code := trim(both '.' from v_code);
+  v_code := regexp_replace(v_code, '\.{2,}', '.', 'g');
+  v_code := left(v_code, 48);
+  select claimed_uid into v_uid from public.allowed_member_codes where code = v_code;
+  if not found then return 'not-found'; end if;
+  if v_uid is not null then return 'already-claimed'; end if;
+  return 'allowed';
+end;
+$$;
+revoke all on function public.check_member_code_allowed(text) from public;
+grant execute on function public.check_member_code_allowed(text) to anon, authenticated;
+
+-- Called right after sign-up (authenticated) — marks the code as taken by the new user.
+-- Idempotent: the same user can re-run without error (handles retries after partial failure).
+create or replace function public.claim_member_code(p_code text, p_uid uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_code text;
+begin
+  if auth.uid() is null or auth.uid() != p_uid then
+    raise exception 'not-authorized';
+  end if;
+  v_code := lower(trim(coalesce(p_code, '')));
+  v_code := regexp_replace(v_code, '[^a-z0-9]+', '.', 'g');
+  v_code := trim(both '.' from v_code);
+  v_code := regexp_replace(v_code, '\.{2,}', '.', 'g');
+  v_code := left(v_code, 48);
+  update public.allowed_member_codes
+  set claimed_uid = p_uid
+  where code = v_code and (claimed_uid is null or claimed_uid = p_uid);
+  if not found then
+    if exists (select 1 from public.allowed_member_codes where code = v_code) then
+      raise exception 'code-already-claimed';
+    else
+      raise exception 'code-not-allowed';
+    end if;
+  end if;
+end;
+$$;
+revoke all on function public.claim_member_code(text, uuid) from public;
+grant execute on function public.claim_member_code(text, uuid) to authenticated;

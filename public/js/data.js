@@ -12,7 +12,9 @@ export const MEMBER_AUTH_ERRORS = Object.freeze({
   INVALID_PASSWORD: 'member-invalid-password',
   INVALID_CREDENTIALS: 'member-invalid-credentials',
   ACCOUNT_EXISTS: 'member-account-exists',
-  EMAIL_CONFIRMATION_REQUIRED: 'member-email-confirmation-required'
+  EMAIL_CONFIRMATION_REQUIRED: 'member-email-confirmation-required',
+  CODE_NOT_ALLOWED: 'member-code-not-allowed',
+  CODE_ALREADY_CLAIMED: 'member-code-already-claimed'
 });
 
 export const MEMBER_RESET_ERRORS = Object.freeze({
@@ -137,6 +139,15 @@ export async function createMemberAccount(name, memberCode, password){
   if(!email) throw new Error(MEMBER_AUTH_ERRORS.INVALID_CODE);
   if(pass.length < 6) throw new Error(MEMBER_AUTH_ERRORS.INVALID_PASSWORD);
 
+  // Check the code is on the pre-approved list before creating an auth user.
+  // If the function doesn't exist yet (migration not run) we skip the check.
+  const { data: codeStatus, error: codeCheckError } = await client.rpc('check_member_code_allowed', { p_code: code });
+  if(codeCheckError && codeCheckError.code !== 'PGRST202'){
+    throw codeCheckError;
+  }
+  if(codeStatus === 'not-found') throw new Error(MEMBER_AUTH_ERRORS.CODE_NOT_ALLOWED);
+  if(codeStatus === 'already-claimed') throw new Error(MEMBER_AUTH_ERRORS.CODE_ALREADY_CLAIMED);
+
   const { data: signUpData, error: signUpError } = await client.auth.signUp({
     email,
     password: pass,
@@ -151,6 +162,10 @@ export async function createMemberAccount(name, memberCode, password){
   }
   if(signUpData?.session && signUpData?.user){
     await syncMemberProfile(signUpData.user, displayName, code);
+    // Mark the code as claimed. Non-fatal if this fails — the auth account exists
+    // and the member can log in; the organiser can remove stale codes manually.
+    const { error: claimError } = await client.rpc('claim_member_code', { p_code: code, p_uid: signUpData.user.id });
+    if(claimError) console.error('claim_member_code failed:', claimError);
     return signUpData.user;
   }
 
@@ -273,4 +288,28 @@ function mapOrder(r){
     uid:r.member_uid, member:r.member_name, memberCode:r.member_code||'', restId:r.rest_id, restName:r.rest_name,
     place:r.place||'', date:r.date||'', items:r.items||[], total:Number(r.total||0), placedAt:r.placed_at
   };
+}
+
+/* ---------------- ALLOWED MEMBER CODES (admin) ---------------- */
+export async function getAllowedCodes(){
+  const client = getClient();
+  const { data, error } = await client
+    .from('allowed_member_codes')
+    .select('code, claimed_uid, added_at')
+    .order('added_at', { ascending: true });
+  if(error) throw error;
+  return (data||[]).map(r=>({ code: r.code, claimed: !!r.claimed_uid, addedAt: r.added_at }));
+}
+export async function addAllowedCode(code){
+  const client = getClient();
+  const normalised = normaliseMemberCode(code);
+  if(!normalised) throw new Error('invalid-code');
+  const { error } = await client.from('allowed_member_codes').insert({ code: normalised });
+  if(error) throw error;
+  return normalised;
+}
+export async function removeAllowedCode(code){
+  const client = getClient();
+  const { error } = await client.from('allowed_member_codes').delete().eq('code', code);
+  if(error) throw error;
 }

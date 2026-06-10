@@ -312,6 +312,12 @@ function renderOnboard(){
         toast('Choose a member code (letters/numbers)');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.INVALID_PASSWORD)){
         toast('Password must be at least 6 characters');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.CODE_NOT_ALLOWED)){
+        $('#ob-code').focus();
+        toast('That member code isn\'t on the approved list. Ask the organiser to add it.');
+      } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.CODE_ALREADY_CLAIMED)){
+        $('#ob-code').focus();
+        toast('That member code is already registered. Use Log in instead.');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.ACCOUNT_EXISTS)){
         toast('That member code already exists. Use Log in or reset the password.');
       } else if(isMemberAuthError(e, DB.MEMBER_AUTH_ERRORS.EMAIL_CONFIRMATION_REQUIRED)){
@@ -841,10 +847,16 @@ function renderSetup(){
   $('#ptitle').textContent = 'Menu setup';
   const c = $('#content');
   c.innerHTML = `<p class="eyebrow">Admin</p><p class="lead">Add the restaurants the choir will visit, with the date and the food &amp; drink options members can choose from.</p>`;
+
+  c.appendChild(el(`<h2 class="sec">Member codes</h2>`));
+  const mcWrap = el(`<div id="mc-wrap"></div>`);
+  c.appendChild(mcWrap);
+  renderMemberCodes();
+
+  c.appendChild(el(`<h2 class="sec">Restaurants on the tour</h2>`));
   c.appendChild(el(`<button class="btn brass" id="addr">+ Add a restaurant</button>`));
   $('#addr').onclick = ()=> editRestaurant(null);
 
-  c.appendChild(el(`<h2 class="sec">Restaurants on the tour</h2>`));
   if(!menu.length){ c.appendChild(el(`<div class="card empty">No restaurants yet — add your first one above.</div>`)); return; }
   menu.forEach(r=>{
     const dp = dayParts(r.date);
@@ -870,8 +882,114 @@ function renderSetup(){
   });
 }
 
+async function renderMemberCodes(){
+  const wrap = $('#mc-wrap');
+  if(!wrap) return;
+  wrap.innerHTML = '<div class="card empty">Loading…</div>';
+
+  let codes;
+  try{ codes = await DB.getAllowedCodes(); }
+  catch(e){
+    wrap.innerHTML = '<div class="card empty">Could not load member codes.</div>';
+    console.error(e);
+    return;
+  }
+
+  wrap.innerHTML = '';
+
+  // Add form (single + bulk)
+  const addCard = el(`
+    <div class="card">
+      <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <label class="fld" style="flex:1;min-width:180px;margin:0">
+          <span>Add member code</span>
+          <input class="input" id="mc-code" placeholder="e.g. thabo.mokoena">
+        </label>
+        <button class="btn brass sm" id="mc-add" style="width:auto">Add</button>
+      </div>
+      <label class="fld" style="margin:10px 0 0">
+        <span>Or paste a list (one code per line)</span>
+        <textarea class="input" id="mc-bulk" rows="3" placeholder="jane.smith&#10;peter.jones&#10;choir.member24"></textarea>
+      </label>
+      <button class="btn ghost sm" id="mc-bulk-add" style="margin-top:8px;width:auto">Import list</button>
+      <div class="note" style="margin-top:8px">Members can only create accounts using a code on this list. Each code can only be claimed once.</div>
+    </div>`);
+  wrap.appendChild(addCard);
+
+  const addOne = async (raw)=>{
+    if(!raw) return false;
+    try{
+      const added = await DB.addAllowedCode(raw);
+      return added;
+    }catch(e){
+      if(/duplicate|unique|already/i.test(String(e?.message||''))) return null; // already exists — silently skip
+      throw e;
+    }
+  };
+
+  $('#mc-add').onclick = async ()=>{
+    const inp = $('#mc-code');
+    const raw = (inp?.value||'').trim();
+    if(!raw){ inp?.focus(); toast('Enter a member code first'); return; }
+    try{
+      const added = await addOne(raw);
+      if(added === false){ inp?.focus(); toast('Invalid code'); return; }
+      if(added === null){ toast(`${normaliseMemberCode(raw)} is already on the list`); inp.value=''; return; }
+      inp.value = '';
+      toast(`Added: ${added}`);
+      renderMemberCodes();
+    }catch(e){ toast('Could not add code'); console.error(e); }
+  };
+  $('#mc-code').addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); $('#mc-add').click(); } });
+
+  $('#mc-bulk-add').onclick = async ()=>{
+    const raw = ($('#mc-bulk')?.value||'');
+    const lines = raw.split(/[\r\n,]+/).map(s=>s.trim()).filter(Boolean);
+    if(!lines.length){ toast('Paste at least one code'); return; }
+    let added=0, skipped=0;
+    try{
+      for(const line of lines){
+        const result = await addOne(line);
+        if(result) added++;
+        else if(result===null) skipped++;
+      }
+      $('#mc-bulk').value = '';
+      toast(`Added ${added} code${added===1?'':'s'}${skipped?`, ${skipped} already existed`:''}`);
+      renderMemberCodes();
+    }catch(e){ toast('Could not import codes'); console.error(e); }
+  };
+
+  // Codes list
+  if(!codes.length){
+    wrap.appendChild(el('<div class="card empty">No codes yet. Add codes above so members can register.</div>'));
+    return;
+  }
+
+  const listCard = el('<div class="card"></div>');
+  codes.forEach(row=>{
+    const item = el(`
+      <div class="moe" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="flex:1;font-family:monospace;font-size:13px">${esc(row.code)}</span>
+        <span class="pill ${row.claimed?'locked':'open'}">${row.claimed?'✓ Claimed':'Open'}</span>
+        <button class="btn danger sm" style="width:auto" data-rmcode="${esc(row.code)}">Remove</button>
+      </div>`);
+    item.querySelector('[data-rmcode]').onclick = async ()=>{
+      const btn = item.querySelector('[data-rmcode]');
+      btn.disabled = true;
+      try{
+        await DB.removeAllowedCode(row.code);
+        item.remove();
+        toast(`Removed: ${row.code}`);
+        if(!listCard.querySelector('.moe')) renderMemberCodes();
+      }catch(e){ btn.disabled=false; toast('Could not remove code'); console.error(e); }
+    };
+    listCard.appendChild(item);
+  });
+  wrap.appendChild(listCard);
+}
+
 function delRestaurant(r){
-  modal({icon:'🗑️', title:`Delete ${r.name}?`, text:'It will be removed from the menu. Orders members already placed are kept.',
+  modal({icon:'🗑️', title:`Delete ${r.name}?`, text:'It will be removed from the menu and all orders placed for this restaurant will also be deleted.',
     actions:[
       {label:'Delete', cls:'btn danger', fn:async ()=>{ try{ await DB.deleteRestaurant(r.id); menu = await DB.loadMenu(); closeModal(); renderSetup(); toast('Restaurant deleted'); }catch(e){ closeModal(); toast('Could not delete'); console.error(e); } }},
       {label:'Cancel', cls:'btn ghost', fn:closeModal}
@@ -1073,61 +1191,48 @@ async function renderAllOrders(){
   const orders = await DB.getAllOrders();
   if(!orders.length){ c.appendChild(el(`<div class="card empty">No orders yet. Once members start ordering, they'll appear here.</div>`)); return; }
 
-  c.appendChild(el(`<button class="btn ghost sm" id="dl" style="margin-bottom:6px">⬇ Download PDF summary</button>`));
-  $('#dl').onclick = ()=> downloadSummary(orders);
+  const groups = buildKitchenGroups(orders);
+  c.appendChild(el(`<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"><button class="btn ghost sm" id="dlall" style="width:auto">⬇ Download all restaurant PDFs</button></div>`));
+  $('#dlall').onclick = ()=> downloadAllRestaurantSummaries(groups);
 
-  // group by restaurant in menu order, then any orphans
-  const order = menu.map(m=>m.id);
-  const groups = {};
-  orders.forEach(o=> (groups[o.restId]=groups[o.restId]||[]).push(o));
-  const ids = Object.keys(groups).sort((a,b)=>{
-    const ia=order.indexOf(a), ib=order.indexOf(b); return (ia<0?99:ia)-(ib<0?99:ib);
-  });
-
-  ids.forEach(restId=>{
-    const list = groups[restId];
-    const r = menu.find(m=>m.id===restId);
-    const name = r? r.name : (list[0].restName||'Removed restaurant');
-    const dp = dayParts(r? r.date : list[0].date);
-    c.appendChild(el(`<div class="ordhead"><h2>${esc(name)}</h2><span class="count">${dp.full||''} · ${list.length} order${list.length>1?'s':''}</span></div>`));
-
-    // aggregate tallies
-    const summary = new Map(); let total=0; const anyPrice = list.some(o=>o.items.some(i=>Number(i.price||0) || Number(i.sub||0)));
-    list.forEach(o=>{
-      o.items.forEach(i=>{
-        const key = orderItemLabel(i);
-        const qty = Number(i.qty||1);
-        const price = Number(i.price||0);
-        const sub = Number(i.sub||price*qty||0);
-        const entry = summary.get(key) || { qty:0, unitPrice:price, subTotal:0 };
-        entry.qty += qty;
-        entry.subTotal += sub;
-        if(!entry.unitPrice && price) entry.unitPrice = price;
-        summary.set(key, entry);
-      });
-      total+=Number(o.total||0);
-    });
-    const agg = el(`<div class="agg"><div class="ln" style="font-weight:700;color:var(--green)"><span>Kitchen summary</span><span></span></div>
-      ${Array.from(summary.entries()).sort((a,b)=>b[1].qty-a[1].qty || a[0].localeCompare(b[0])).map(([n,row])=>`<div class="ln"><span>${esc(n)}</span><span class="q">${row.qty} × ${fmtMoney(row.unitPrice)}${row.subTotal&&row.subTotal!==row.qty*row.unitPrice?` = ${fmtMoney(row.subTotal)}`:''}</span></div>`).join('')}
-      ${anyPrice?`<div class="ln" style="font-weight:700"><span>Total value</span><span>${fmtMoney(total)}</span></div>`:''}
-    </div>`);
-    c.appendChild(agg);
-
-    // per-member
-    const box = el(`<div class="card"></div>`);
-    list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
-      box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b>${o.memberCode?` <span class="it">(${esc(o.memberCode)})</span>`:''} — <span class="it">${o.items.map(i=>esc(orderItemLabel(i))).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
-    });
-    c.appendChild(box);
+  groups.forEach(group=>{
+    c.appendChild(renderKitchenGroup(group, true));
   });
 }
 
-function downloadSummary(orders){
-  const groups = buildKitchenGroups(orders);
+function renderKitchenGroup(group, showDownloadButton=false){
+  const section = el(`<div></div>`);
+  const head = el(`<div class="ordhead"><h2>${esc(group.name)}</h2><span class="count">${group.date.full||''} · ${group.list.length} order${group.list.length===1?'':'s'}</span></div>`);
+  if(showDownloadButton){
+    const btn = el(`<button class="btn ghost sm" style="width:auto">⬇ Download PDF</button>`);
+    btn.onclick = ()=> downloadRestaurantSummary(group);
+    head.appendChild(btn);
+  }
+  section.appendChild(head);
+
+  const agg = el(`<div class="agg"><div class="ln" style="font-weight:700;color:var(--green)"><span>Kitchen summary</span><span></span></div>
+    ${group.summary.map(row=>`<div class="ln"><span>${esc(row.label)}</span><span class="q">${row.qty} × ${fmtMoney(row.unitPrice)}${row.subTotal&&row.subTotal!==row.qty*row.unitPrice?` = ${fmtMoney(row.subTotal)}`:''}</span></div>`).join('')}
+    ${group.anyPrice?`<div class="ln" style="font-weight:700"><span>Total value</span><span>${fmtMoney(group.total)}</span></div>`:''}
+  </div>`);
+  section.appendChild(agg);
+
+  const box = el(`<div class="card"></div>`);
+  group.list.forEach(o=>{
+    box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b>${o.memberCode?` <span class="it">(${esc(o.memberCode)})</span>`:''} — <span class="it">${o.items.map(i=>esc(orderItemLabel(i))).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
+  });
+  section.appendChild(box);
+  return section;
+}
+
+function downloadAllRestaurantSummaries(groups){
+  groups.forEach(group=> downloadRestaurantSummary(group));
+}
+
+function downloadRestaurantSummary(group){
   const jsPDF = window.jspdf?.jsPDF;
   const canPdf = !!jsPDF && typeof jsPDF?.API?.autoTable === 'function';
   if(!canPdf){
-    downloadSummaryText(groups);
+    downloadSummaryText([group]);
     return;
   }
 
@@ -1145,60 +1250,57 @@ function downloadSummary(orders){
     doc.text(`Page ${pageNumber}`, pageWidth - margin, pageHeight - 18, { align:'right' });
   };
 
-  groups.forEach((group, index)=>{
-    if(index>0) doc.addPage();
-    doc.setTextColor(31, 61, 52);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(22);
-    doc.text('Choir Tour Meals', margin, 34);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(12);
-    doc.setTextColor(111, 101, 87);
-    doc.text('Kitchen summary and per-member breakdown', margin, 52);
-    doc.setFontSize(11);
-    doc.text(`${group.name}  ·  ${group.date.full || 'No date'}  ·  ${group.list.length} order${group.list.length===1 ? '' : 's'}`, margin, 72);
+  doc.setTextColor(31, 61, 52);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(22);
+  doc.text('Choir Tour Meals', margin, 34);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(12);
+  doc.setTextColor(111, 101, 87);
+  doc.text('Kitchen summary and per-member breakdown', margin, 52);
+  doc.setFontSize(11);
+  doc.text(`${group.name}  ·  ${group.date.full || 'No date'}  ·  ${group.list.length} order${group.list.length===1 ? '' : 's'}`, margin, 72);
 
-    doc.autoTable({
-      startY: 90,
-      head: [['Item', 'Qty', 'Price', 'Subtotal']],
-      body: group.summary.length ? group.summary.map(row=>[
-        row.label,
-        String(row.qty),
-        row.unitPrice ? fmtMoney(row.unitPrice) : '—',
-        group.anyPrice ? fmtMoney(row.subTotal || (row.qty * row.unitPrice)) : '—'
-      ]) : [['No items', '', '', '']],
-      theme: 'grid',
-      styles: { font:'helvetica', fontSize:10, cellPadding:5, textColor:[36,31,26], lineColor:[224,213,192] },
-      headStyles: { fillColor:[31,61,52], textColor:[255,255,255], fontStyle:'bold' },
-      alternateRowStyles: { fillColor:[251,247,238] },
-      columnStyles: { 1:{ halign:'center', cellWidth:50 }, 2:{ halign:'right', cellWidth:78 }, 3:{ halign:'right', cellWidth:88 }, 4:{ halign:'right', cellWidth:92 } },
-      margin: { left:margin, right:margin },
-      didDrawPage: addFooter,
-    });
-
-    doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 18,
-      head: [['Member', 'Items', 'Total']],
-      body: group.list.length ? group.list.map(o=>[
-        o.member + (o.memberCode ? ` (${o.memberCode})` : ''),
-        (o.items||[]).map(i=>{
-          const label = orderItemLabel(i);
-          const price = Number(i.price||0);
-          return price ? `${label} (${fmtMoney(price)})` : label;
-        }).join(' · '),
-        o.total ? fmtMoney(o.total) : '—'
-      ]) : [['No members', '', '']],
-      theme: 'striped',
-      styles: { font:'helvetica', fontSize:9.5, cellPadding:5, textColor:[36,31,26], lineColor:[224,213,192] },
-      headStyles: { fillColor:[184,138,54], textColor:[255,255,255], fontStyle:'bold' },
-      alternateRowStyles: { fillColor:[253,249,239] },
-      columnStyles: { 2:{ halign:'right', cellWidth:80 } },
-      margin: { left:margin, right:margin },
-      didDrawPage: addFooter,
-    });
+  doc.autoTable({
+    startY: 90,
+    head: [['Item', 'Qty', 'Price', 'Subtotal']],
+    body: group.summary.length ? group.summary.map(row=>[
+      row.label,
+      String(row.qty),
+      row.unitPrice ? fmtMoney(row.unitPrice) : '—',
+      group.anyPrice ? fmtMoney(row.subTotal || (row.qty * row.unitPrice)) : '—'
+    ]) : [['No items', '', '', '']],
+    theme: 'grid',
+    styles: { font:'helvetica', fontSize:10, cellPadding:5, textColor:[36,31,26], lineColor:[224,213,192] },
+    headStyles: { fillColor:[31,61,52], textColor:[255,255,255], fontStyle:'bold' },
+    alternateRowStyles: { fillColor:[251,247,238] },
+    columnStyles: { 1:{ halign:'center', cellWidth:50 }, 2:{ halign:'right', cellWidth:78 }, 3:{ halign:'right', cellWidth:88 }, 4:{ halign:'right', cellWidth:92 } },
+    margin: { left:margin, right:margin },
+    didDrawPage: addFooter,
   });
 
-  doc.save('choir-tour-orders.pdf');
+  doc.autoTable({
+    startY: doc.lastAutoTable.finalY + 18,
+    head: [['Member', 'Items', 'Total']],
+    body: group.list.length ? group.list.map(o=>[
+      o.member + (o.memberCode ? ` (${o.memberCode})` : ''),
+      (o.items||[]).map(i=>{
+        const label = orderItemLabel(i);
+        const price = Number(i.price||0);
+        return price ? `${label} (${fmtMoney(price)})` : label;
+      }).join(' · '),
+      o.total ? fmtMoney(o.total) : '—'
+    ]) : [['No members', '', '']],
+    theme: 'striped',
+    styles: { font:'helvetica', fontSize:9.5, cellPadding:5, textColor:[36,31,26], lineColor:[224,213,192] },
+    headStyles: { fillColor:[184,138,54], textColor:[255,255,255], fontStyle:'bold' },
+    alternateRowStyles: { fillColor:[253,249,239] },
+    columnStyles: { 2:{ halign:'right', cellWidth:80 } },
+    margin: { left:margin, right:margin },
+    didDrawPage: addFooter,
+  });
+
+  doc.save(`${group.name.replace(/[^a-z0-9]+/gi,'-').replace(/^-+|-+$/g,'').toLowerCase() || 'restaurant'}-summary.pdf`);
 }
 
 function downloadSummaryText(groups){
