@@ -48,6 +48,21 @@ function parseMenuOptionHeader(line){
     price:Number.isFinite(price) && price > 0 ? price : 0
   };
 }
+function parseTypedMenuOptionHeader(line){
+  const clean = plainTextLine(line).replace(/^[^A-Za-z0-9]+/, '').trim();
+  const m = clean.match(/^(.+?)\s*[–—-]\s*(.+?)(?:\s*\((?:R|ZAR)?\s*([\d.,]+)\))?\s*$/i);
+  if(!m) return null;
+  const label = m[1].trim();
+  const name = m[2].trim();
+  const priceRaw = String(m[3]||'').replace(/,/g, '');
+  const price = priceRaw ? parseFloat(priceRaw) : 0;
+  if(!label || !name) return null;
+  return {
+    type: label,
+    name,
+    price:Number.isFinite(price) && price > 0 ? price : 0
+  };
+}
 function parsePastedOptions(raw){
   const items = [];
   let current = null;
@@ -66,6 +81,12 @@ function parsePastedOptions(raw){
     if(header){
       pushCurrent();
       current = { id:rid(), name:header.name, type:'', price:header.price, desc:'' };
+      return;
+    }
+    const typedHeader = parseTypedMenuOptionHeader(plain);
+    if(typedHeader){
+      pushCurrent();
+      current = { id:rid(), name:typedHeader.name, type:typedHeader.type, price:typedHeader.price, desc:'' };
       return;
     }
     if(/^note\s*:/i.test(plain)){
@@ -923,9 +944,9 @@ function optionBulkImporter(kind){
   const box = el(`<div class="card">
     <label class="fld" style="margin:0">
       <span>Paste a ${foodMode?'food':'drink'} list</span>
-      <textarea class="input bulk-text" placeholder="${foodMode?'🍕 **Option 1 – Margherita (R145)**\n**Type:** Pizza\nFior di Latte Mozzarella, Napoletana Sauce, Fresh Basil':'Option 1 – Sparkling Water (R30)\nType: Soft drink\n500ml bottle'}"></textarea>
+      <textarea class="input bulk-text" placeholder="${foodMode?'Pizza - Margherita (R145)\nFior di Latte Mozzarella, Napoletana Sauce, Fresh Basil':'Drink - Sparkling Water (R30)\n500ml bottle'}"></textarea>
     </label>
-    <div class="empty" style="padding:0 0 10px">Paste one option per block. I’ll read lines like “Option 1 – Margherita (R145)”, “Type: Pizza”, and the ingredients line underneath.</div>
+    <div class="empty" style="padding:0 0 10px">Paste one option per block. I’ll read lines like “Pizza - Margherita (R145)” and use the next line as the description.</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn ghost sm import-btn" style="width:auto">Import pasted list</button>
       <button class="btn ghost sm clear-btn" style="width:auto">Clear box</button>
