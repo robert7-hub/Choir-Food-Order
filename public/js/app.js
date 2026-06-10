@@ -704,6 +704,52 @@ function refreshSummary(r){
   </div>`;
 }
 
+function buildKitchenGroups(orders){
+  const order = menu.map(m=>m.id);
+  const groups = {};
+  orders.forEach(o=> (groups[o.restId]=groups[o.restId]||[]).push(o));
+  const ids = Object.keys(groups).sort((a,b)=>{
+    const ia=order.indexOf(a), ib=order.indexOf(b);
+    return (ia<0?99:ia)-(ib<0?99:ib);
+  });
+
+  return ids.map(restId=>{
+    const list = (groups[restId]||[]).slice().sort((a,b)=>a.member.localeCompare(b.member));
+    const r = menu.find(m=>m.id===restId);
+    const name = r ? r.name : (list[0]?.restName || 'Removed restaurant');
+    const date = dayParts(r ? r.date : list[0]?.date);
+    const tally = new Map();
+    let total = 0;
+    let anyPrice = false;
+
+    list.forEach(o=>{
+      (o.items||[]).forEach(i=>{
+        const label = orderItemLabel(i);
+        const qty = Number(i.qty||1);
+        const price = Number(i.price||0);
+        const sub = Number(i.sub||price*qty||0);
+        anyPrice = anyPrice || price > 0 || sub > 0;
+        const entry = tally.get(label) || { label, qty:0, unitPrice:price, subTotal:0 };
+        entry.qty += qty;
+        entry.subTotal += sub;
+        if(!entry.unitPrice && price) entry.unitPrice = price;
+        tally.set(label, entry);
+      });
+      total += Number(o.total||0);
+    });
+
+    return {
+      restId,
+      name,
+      date,
+      list,
+      total,
+      anyPrice,
+      summary: Array.from(tally.values()).sort((a,b)=>b.qty-a.qty || a.label.localeCompare(b.label)),
+    };
+  });
+}
+
 /* ----- double confirmation + save ----- */
 function startSaveFlow(r){
   const {lines} = cartLines(r);
@@ -1027,7 +1073,7 @@ async function renderAllOrders(){
   const orders = await DB.getAllOrders();
   if(!orders.length){ c.appendChild(el(`<div class="card empty">No orders yet. Once members start ordering, they'll appear here.</div>`)); return; }
 
-  c.appendChild(el(`<button class="btn ghost sm" id="dl" style="margin-bottom:6px">⬇ Download full summary (.txt)</button>`));
+  c.appendChild(el(`<button class="btn ghost sm" id="dl" style="margin-bottom:6px">⬇ Download PDF summary</button>`));
   $('#dl').onclick = ()=> downloadSummary(orders);
 
   // group by restaurant in menu order, then any orphans
@@ -1046,10 +1092,23 @@ async function renderAllOrders(){
     c.appendChild(el(`<div class="ordhead"><h2>${esc(name)}</h2><span class="count">${dp.full||''} · ${list.length} order${list.length>1?'s':''}</span></div>`));
 
     // aggregate tallies
-    const tally = {}; let total=0; const anyPrice = list.some(o=>o.items.some(i=>i.price));
-    list.forEach(o=>{ o.items.forEach(i=>{ const key = orderItemLabel(i); tally[key]=(tally[key]||0)+i.qty; }); total+=o.total||0; });
+    const summary = new Map(); let total=0; const anyPrice = list.some(o=>o.items.some(i=>Number(i.price||0) || Number(i.sub||0)));
+    list.forEach(o=>{
+      o.items.forEach(i=>{
+        const key = orderItemLabel(i);
+        const qty = Number(i.qty||1);
+        const price = Number(i.price||0);
+        const sub = Number(i.sub||price*qty||0);
+        const entry = summary.get(key) || { qty:0, unitPrice:price, subTotal:0 };
+        entry.qty += qty;
+        entry.subTotal += sub;
+        if(!entry.unitPrice && price) entry.unitPrice = price;
+        summary.set(key, entry);
+      });
+      total+=Number(o.total||0);
+    });
     const agg = el(`<div class="agg"><div class="ln" style="font-weight:700;color:var(--green)"><span>Kitchen summary</span><span></span></div>
-      ${Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([n,q])=>`<div class="ln"><span>${esc(n)}</span><span class="q">${q}</span></div>`).join('')}
+      ${Array.from(summary.entries()).sort((a,b)=>b[1].qty-a[1].qty || a[0].localeCompare(b[0])).map(([n,row])=>`<div class="ln"><span>${esc(n)}</span><span class="q">${row.qty} × ${fmtMoney(row.unitPrice)}${row.subTotal&&row.subTotal!==row.qty*row.unitPrice?` = ${fmtMoney(row.subTotal)}`:''}</span></div>`).join('')}
       ${anyPrice?`<div class="ln" style="font-weight:700"><span>Total value</span><span>${fmtMoney(total)}</span></div>`:''}
     </div>`);
     c.appendChild(agg);
@@ -1064,22 +1123,94 @@ async function renderAllOrders(){
 }
 
 function downloadSummary(orders){
-  const order = menu.map(m=>m.id);
-  const groups={}; orders.forEach(o=> (groups[o.restId]=groups[o.restId]||[]).push(o));
-  const ids = Object.keys(groups).sort((a,b)=>{const ia=order.indexOf(a),ib=order.indexOf(b);return (ia<0?99:ia)-(ib<0?99:ib);});
+  const groups = buildKitchenGroups(orders);
+  const jsPDF = window.jspdf?.jsPDF;
+  const canPdf = !!jsPDF && typeof jsPDF?.API?.autoTable === 'function';
+  if(!canPdf){
+    downloadSummaryText(groups);
+    return;
+  }
+
+  const doc = new jsPDF({ orientation:'landscape', unit:'pt', format:'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 38;
+  const generated = new Date().toLocaleString('en-ZA');
+
+  const addFooter = ()=>{
+    const pageNumber = doc.getCurrentPageInfo().pageNumber;
+    doc.setFontSize(9);
+    doc.setTextColor(111, 101, 87);
+    doc.text(`Generated ${generated}`, margin, pageHeight - 18);
+    doc.text(`Page ${pageNumber}`, pageWidth - margin, pageHeight - 18, { align:'right' });
+  };
+
+  groups.forEach((group, index)=>{
+    if(index>0) doc.addPage();
+    doc.setTextColor(31, 61, 52);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(22);
+    doc.text('Choir Tour Meals', margin, 34);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(12);
+    doc.setTextColor(111, 101, 87);
+    doc.text('Kitchen summary and per-member breakdown', margin, 52);
+    doc.setFontSize(11);
+    doc.text(`${group.name}  ·  ${group.date.full || 'No date'}  ·  ${group.list.length} order${group.list.length===1 ? '' : 's'}`, margin, 72);
+
+    doc.autoTable({
+      startY: 90,
+      head: [['Item', 'Qty', 'Price', 'Subtotal']],
+      body: group.summary.length ? group.summary.map(row=>[
+        row.label,
+        String(row.qty),
+        row.unitPrice ? fmtMoney(row.unitPrice) : '—',
+        group.anyPrice ? fmtMoney(row.subTotal || (row.qty * row.unitPrice)) : '—'
+      ]) : [['No items', '', '', '']],
+      theme: 'grid',
+      styles: { font:'helvetica', fontSize:10, cellPadding:5, textColor:[36,31,26], lineColor:[224,213,192] },
+      headStyles: { fillColor:[31,61,52], textColor:[255,255,255], fontStyle:'bold' },
+      alternateRowStyles: { fillColor:[251,247,238] },
+      columnStyles: { 1:{ halign:'center', cellWidth:50 }, 2:{ halign:'right', cellWidth:78 }, 3:{ halign:'right', cellWidth:88 }, 4:{ halign:'right', cellWidth:92 } },
+      margin: { left:margin, right:margin },
+      didDrawPage: addFooter,
+    });
+
+    doc.autoTable({
+      startY: doc.lastAutoTable.finalY + 18,
+      head: [['Member', 'Items', 'Total']],
+      body: group.list.length ? group.list.map(o=>[
+        o.member + (o.memberCode ? ` (${o.memberCode})` : ''),
+        (o.items||[]).map(i=>{
+          const label = orderItemLabel(i);
+          const price = Number(i.price||0);
+          return price ? `${label} (${fmtMoney(price)})` : label;
+        }).join(' · '),
+        o.total ? fmtMoney(o.total) : '—'
+      ]) : [['No members', '', '']],
+      theme: 'striped',
+      styles: { font:'helvetica', fontSize:9.5, cellPadding:5, textColor:[36,31,26], lineColor:[224,213,192] },
+      headStyles: { fillColor:[184,138,54], textColor:[255,255,255], fontStyle:'bold' },
+      alternateRowStyles: { fillColor:[253,249,239] },
+      columnStyles: { 2:{ halign:'right', cellWidth:80 } },
+      margin: { left:margin, right:margin },
+      didDrawPage: addFooter,
+    });
+  });
+
+  doc.save('choir-tour-orders.pdf');
+}
+
+function downloadSummaryText(groups){
   let out = 'CHOIR CAPE TOUR — MEAL ORDERS\nGenerated '+new Date().toLocaleString('en-ZA')+'\n';
-  ids.forEach(id=>{
-    const list=groups[id]; const r=menu.find(m=>m.id===id);
-    const name=r?r.name:(list[0].restName||'Removed'); const dp=dayParts(r?r.date:list[0].date);
-    out += `\n========================================\n${name}  (${dp.full||'no date'})  —  ${list.length} orders\n========================================\n`;
-    const tally={}; let total=0;
-    list.forEach(o=>{o.items.forEach(i=>{ const key = orderItemLabel(i); tally[key]=(tally[key]||0)+i.qty; }); total+=o.total||0;});
+  groups.forEach(group=>{
+    out += `\n========================================\n${group.name}  (${group.date.full||'no date'})  —  ${group.list.length} orders\n========================================\n`;
     out += 'KITCHEN SUMMARY:\n';
-    Object.entries(tally).sort((a,b)=>b[1]-a[1]).forEach(([n,q])=> out+=`  ${q}x ${n}\n`);
-    if(total) out += `  TOTAL VALUE: ${fmtMoney(total)}\n`;
+    group.summary.forEach(row=> out += `  ${row.qty}x ${row.label}${row.unitPrice ? ` @ ${fmtMoney(row.unitPrice)}` : ''}${row.subTotal ? ` (${fmtMoney(row.subTotal)})` : ''}\n`);
+    if(group.anyPrice) out += `  TOTAL VALUE: ${fmtMoney(group.total)}\n`;
     out += '\nPER MEMBER:\n';
-    list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
-      out += `  ${o.member}${o.memberCode?` (${o.memberCode})`:''}: ${o.items.map(i=>orderItemLabel(i)).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
+    group.list.forEach(o=>{
+      out += `  ${o.member}${o.memberCode?` (${o.memberCode})`:''}: ${o.items.map(i=>`${orderItemLabel(i)}${Number(i.price||0) ? ` (${fmtMoney(i.price)})` : ''}`).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
     });
   });
   const blob = new Blob([out],{type:'text/plain'});
