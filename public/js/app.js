@@ -15,6 +15,76 @@ const el = (html)=>{ const t=document.createElement('template'); t.innerHTML=htm
 const esc = (s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const rid = ()=>Math.random().toString(36).slice(2,8);
 function fmtMoney(n){ return 'R' + Number(n||0).toFixed(2); }
+function optionDetails(it){
+  const parts = [];
+  const type = String(it?.type||'').trim();
+  const desc = String(it?.desc||'').trim();
+  if(type) parts.push(`Type: ${type}`);
+  if(desc) parts.push(desc);
+  return parts.join(' | ');
+}
+function orderItemLabel(i){
+  const name = String(i?.name||'').trim();
+  const itemType = String(i?.itemType||'').trim();
+  return itemType ? `${name} (${itemType})` : name;
+}
+function plainTextLine(s){
+  return String(s??'')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\*\*/g, '')
+    .replace(/__/g, '')
+    .replace(/`/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+function parseMenuOptionHeader(line){
+  const clean = plainTextLine(line).replace(/^[^A-Za-z0-9]+/, '').trim();
+  const m = clean.match(/^Option\s*\d+\s*[–—-]\s*(.+?)(?:\s*\((?:R|ZAR)?\s*([\d.,]+)\))?\s*$/i);
+  if(!m) return null;
+  const priceRaw = String(m[2]||'').replace(/,/g, '');
+  const price = priceRaw ? parseFloat(priceRaw) : 0;
+  return {
+    name:m[1].trim(),
+    price:Number.isFinite(price) && price > 0 ? price : 0
+  };
+}
+function parsePastedOptions(raw){
+  const items = [];
+  let current = null;
+  const pushCurrent = ()=>{
+    if(!current?.name) return;
+    current.type = String(current.type||'').trim();
+    current.desc = String(current.desc||'').trim();
+    items.push(current);
+  };
+
+  String(raw||'').split(/\r?\n/).forEach(line=>{
+    const trimmed = String(line||'').trim();
+    if(!trimmed) return;
+    const plain = plainTextLine(trimmed);
+    const header = parseMenuOptionHeader(plain);
+    if(header){
+      pushCurrent();
+      current = { id:rid(), name:header.name, type:'', price:header.price, desc:'' };
+      return;
+    }
+    if(/^note\s*:/i.test(plain)){
+      pushCurrent();
+      current = null;
+      return;
+    }
+    if(!current) return;
+    const typeMatch = plain.match(/^Type\s*:\s*(.+)$/i);
+    if(typeMatch){
+      current.type = typeMatch[1].trim();
+      return;
+    }
+    current.desc = current.desc ? `${current.desc} ${plain}` : plain;
+  });
+
+  pushCurrent();
+  return items;
+}
 function dayParts(iso){
   if(!iso) return {d:'–',m:''};
   const dt = new Date(iso+'T00:00');
@@ -553,10 +623,11 @@ function selectList(items, restId, kind, showPrices=false){
   // single-select: each member picks ONE option per category (tap again to clear)
   const box = el(`<div class="selgroup"></div>`);
   items.forEach(it=>{
+    const details = optionDetails(it);
     const opt = el(`
       <button type="button" class="opt" data-id="${it.id}">
         <span class="tick" aria-hidden="true"></span>
-        <span class="nm"><b>${esc(it.name)}</b>${it.desc?`<div class="ing">${esc(it.desc)}</div>`:''}${showPrices&&it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</span>
+        <span class="nm"><b>${esc(it.name)}</b>${details?`<div class="ing">${esc(details)}</div>`:''}${showPrices&&it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</span>
       </button>`);
     opt.onclick = ()=>{
       const cur = (cart[restId]||{})[kind];
@@ -573,7 +644,20 @@ function selectList(items, restId, kind, showPrices=false){
 function cartLines(r){
   const sel = cart[r.id] || {};
   const lines=[]; let total=0;
-  const pick=(arr,kind)=>{ const it=(arr||[]).find(x=>x.id===sel[kind]); if(it){ const p=it.price||0; total+=p; lines.push({name:it.name,type:kind,qty:1,price:p,sub:p}); } };
+  const pick=(arr,kind)=>{
+    const it=(arr||[]).find(x=>x.id===sel[kind]);
+    if(!it) return;
+    const p=it.price||0;
+    total+=p;
+    lines.push({
+      name:it.name,
+      type:kind,
+      itemType:String(it.type||'').trim(),
+      qty:1,
+      price:p,
+      sub:p
+    });
+  };
   pick(r.food,'food'); pick(r.drinks,'drink');
   return {lines, total};
 }
@@ -593,7 +677,7 @@ function refreshSummary(r){
     return;
   }
   box.innerHTML = `<div class="summary">
-    ${lines.map(l=>`<div class="ln"><span>${esc(l.name)}</span>${showPrices&&anyPrice?`<span>${fmtMoney(l.sub)}</span>`:''}</div>`).join('')}
+    ${lines.map(l=>`<div class="ln"><span>${esc(orderItemLabel(l))}</span>${showPrices&&anyPrice?`<span>${fmtMoney(l.sub)}</span>`:''}</div>`).join('')}
     ${showPrices&&anyPrice?`<div class="ln tot"><span>Total</span><span>${fmtMoney(total)}</span></div>`:''}
     ${needFood&&!hasFood?`<div class="empty" style="margin-top:6px">Please choose a meal to continue.</div>`:''}
   </div>`;
@@ -607,7 +691,7 @@ function startSaveFlow(r){
   modal({
     icon:'📝', title:'Save this order?',
     text:`Once saved, your order for ${r.name} cannot be changed. Are you happy to save it?`,
-    custom:`<div class="summary" style="text-align:left">${lines.map(l=>`<div class="ln"><span>${esc(l.name)}</span></div>`).join('')}</div>`,
+    custom:`<div class="summary" style="text-align:left">${lines.map(l=>`<div class="ln"><span>${esc(orderItemLabel(l))}</span></div>`).join('')}</div>`,
     actions:[
       {label:'Yes, save it', cls:'btn brass', keep:true, fn:()=> confirmFinal(r)},
       {label:'Not yet', cls:'btn ghost', fn:closeModal}
@@ -676,7 +760,7 @@ function ticketEl(o){
       </div>
       <div class="stamp">FINAL</div>
       <div class="body">
-        ${o.items.map(i=>`<div class="row"><span><span class="q">${i.type==='drink'?'🥤':'🍽️'}</span>${esc(i.name)}</span>${anyPrice?`<span>${fmtMoney(i.sub)}</span>`:''}</div>`).join('')}
+        ${o.items.map(i=>`<div class="row"><span><span class="q">${i.type==='drink'?'🥤':'🍽️'}</span>${esc(orderItemLabel(i))}</span>${anyPrice?`<span>${fmtMoney(i.sub)}</span>`:''}</div>`).join('')}
         ${anyPrice?`<div class="ttl"><span>Total</span><span>${fmtMoney(o.total)}</span></div>`:''}
       </div>
       <div class="foot">Placed ${new Date(o.placedAt).toLocaleString('en-ZA',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} · cannot be changed</div>
@@ -729,10 +813,12 @@ function delRestaurant(r){
 
 /* draft buffer for the editor */
 let draft = null;
+let optionEditors = { food:null, drinks:null };
 function editRestaurant(id){
   const existing = id ? menu.find(x=>x.id===id) : null;
   draft = existing ? JSON.parse(JSON.stringify(existing))
                     : { id:rid(), name:'', place:'', date:'', info:'', food:[], drinks:[] };
+  optionEditors = { food:null, drinks:null };
   $('#ptitle').textContent = existing ? 'Edit restaurant' : 'New restaurant';
   const c = $('#content');
   c.innerHTML='';
@@ -750,9 +836,11 @@ function editRestaurant(id){
   c.appendChild(el(`<h2 class="sec">Food options</h2>`));
   const foodBox = el(`<div class="card" id="foodbox" style="padding:4px 16px"></div>`); c.appendChild(foodBox);
   c.appendChild(optionAdder('food'));
+  c.appendChild(optionBulkImporter('food'));
   c.appendChild(el(`<h2 class="sec">Drink options</h2>`));
   const drinkBox = el(`<div class="card" id="drinkbox" style="padding:4px 16px"></div>`); c.appendChild(drinkBox);
   c.appendChild(optionAdder('drinks'));
+  c.appendChild(optionBulkImporter('drinks'));
 
   drawOptions();
   const save = el(`<button class="btn brass" id="rsave" style="margin-top:18px">Save restaurant</button>`);
@@ -761,19 +849,109 @@ function editRestaurant(id){
 }
 
 function optionAdder(kind){
+  const foodMode = kind==='food';
   const box = el(`<div class="card">
     <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-      <label class="fld" style="flex:1;min-width:140px;margin:0"><span>Add ${kind==='food'?'a dish':'a drink'}</span><input class="input add-name" placeholder="${kind==='food'?'e.g. Lamb potjie':'e.g. Rooibos iced tea'}"></label>
+      <label class="fld" style="flex:1;min-width:140px;margin:0"><span>Add ${foodMode?'a dish':'a drink'}</span><input class="input add-name" placeholder="${foodMode?'e.g. Lamb potjie':'e.g. Rooibos iced tea'}"></label>
+      <label class="fld" style="width:130px;margin:0"><span>Type (optional)</span><input class="input add-type" placeholder="${foodMode?'e.g. Pizza':'e.g. Soft drink'}"></label>
       <label class="fld" style="width:110px;margin:0"><span>Price (optional)</span><input class="input add-price" type="number" min="0" step="0.01" placeholder="R"></label>
     </div>
-    <label class="fld" style="margin:10px 0 0"><span>Ingredients / what's in it (optional)</span><input class="input add-desc" placeholder="${kind==='food'?'e.g. Slow-cooked lamb, potatoes, carrots, red wine':'e.g. Rooibos tea, lemon, honey, ice'}"></label>
-    <button class="btn sm add-btn" style="width:auto;margin-top:10px">Add</button>
+    <label class="fld" style="margin:10px 0 0"><span>Ingredients / what's in it (optional)</span><input class="input add-desc" placeholder="${foodMode?'e.g. Slow-cooked lamb, potatoes, carrots, red wine':'e.g. Rooibos tea, lemon, honey, ice'}"></label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn sm add-btn" style="width:auto">Add</button>
+      <button class="btn ghost sm cancel-btn" style="width:auto;display:none">Cancel edit</button>
+    </div>
   </div>`);
-  const nameI=box.querySelector('.add-name'), priceI=box.querySelector('.add-price'), descI=box.querySelector('.add-desc');
-  const add=()=>{ const n=nameI.value.trim(); if(!n) return; const p=parseFloat(priceI.value)||0; const d=descI.value.trim();
-    draft[kind].push({id:rid(),name:n,price:p,desc:d}); nameI.value=''; priceI.value=''; descI.value=''; nameI.focus(); drawOptions(); };
-  box.querySelector('.add-btn').onclick=add;
-  [nameI,descI].forEach(i=> i.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();add();} }));
+  const nameI=box.querySelector('.add-name');
+  const typeI=box.querySelector('.add-type');
+  const priceI=box.querySelector('.add-price');
+  const descI=box.querySelector('.add-desc');
+  const addBtn=box.querySelector('.add-btn');
+  const cancelBtn=box.querySelector('.cancel-btn');
+
+  const editor = { kind, nameI, typeI, priceI, descI, addBtn, cancelBtn, editingId:null };
+  editor.reset = (focus=false)=>{
+    editor.editingId = null;
+    nameI.value = '';
+    typeI.value = '';
+    priceI.value = '';
+    descI.value = '';
+    addBtn.textContent = 'Add';
+    cancelBtn.style.display = 'none';
+    if(focus) nameI.focus();
+  };
+  editor.beginEdit = (item)=>{
+    editor.editingId = item.id;
+    nameI.value = item.name || '';
+    typeI.value = item.type || '';
+    priceI.value = item.price ? String(item.price) : '';
+    descI.value = item.desc || '';
+    addBtn.textContent = 'Update';
+    cancelBtn.style.display = 'inline-flex';
+    nameI.focus();
+    nameI.select();
+  };
+
+  const saveOption=()=>{
+    const n = nameI.value.trim();
+    if(!n){ nameI.focus(); return; }
+    const pv = parseFloat(priceI.value);
+    const option = {
+      name:n,
+      type:typeI.value.trim(),
+      price:Number.isFinite(pv) && pv > 0 ? pv : 0,
+      desc:descI.value.trim()
+    };
+    if(editor.editingId){
+      const idx = draft[kind].findIndex(x=>x.id===editor.editingId);
+      if(idx>=0) draft[kind][idx] = { ...draft[kind][idx], ...option };
+    }else{
+      draft[kind].push({ id:rid(), ...option });
+    }
+    editor.reset(true);
+    drawOptions();
+  };
+
+  addBtn.onclick = saveOption;
+  cancelBtn.onclick = ()=> editor.reset(true);
+  [nameI,typeI,priceI,descI].forEach(i=> i.addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); saveOption(); } }));
+  optionEditors[kind] = editor;
+  return box;
+}
+function optionBulkImporter(kind){
+  const foodMode = kind==='food';
+  const box = el(`<div class="card">
+    <label class="fld" style="margin:0">
+      <span>Paste a ${foodMode?'food':'drink'} list</span>
+      <textarea class="input bulk-text" placeholder="${foodMode?'🍕 **Option 1 – Margherita (R145)**\n**Type:** Pizza\nFior di Latte Mozzarella, Napoletana Sauce, Fresh Basil':'Option 1 – Sparkling Water (R30)\nType: Soft drink\n500ml bottle'}"></textarea>
+    </label>
+    <div class="empty" style="padding:0 0 10px">Paste one option per block. I’ll read lines like “Option 1 – Margherita (R145)”, “Type: Pizza”, and the ingredients line underneath.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn ghost sm import-btn" style="width:auto">Import pasted list</button>
+      <button class="btn ghost sm clear-btn" style="width:auto">Clear box</button>
+    </div>
+  </div>`);
+  const textI = box.querySelector('.bulk-text');
+  const importBtn = box.querySelector('.import-btn');
+  const clearBtn = box.querySelector('.clear-btn');
+
+  importBtn.onclick = ()=>{
+    const items = parsePastedOptions(textI.value);
+    if(!items.length){
+      textI.focus();
+      toast('No options found in that pasted list');
+      return;
+    }
+    draft[kind].push(...items);
+    optionEditors[kind]?.reset();
+    drawOptions();
+    textI.value = '';
+    toast(`Imported ${items.length} ${foodMode?'food option':'drink option'}${items.length===1?'':'s'}`);
+  };
+  clearBtn.onclick = ()=>{
+    textI.value = '';
+    textI.focus();
+  };
   return box;
 }
 function drawOptions(){
@@ -783,9 +961,20 @@ function drawOptions(){
     if(!items.length){ box.innerHTML=`<div class="empty">None added yet.</div>`; return; }
     box.innerHTML='';
     items.forEach(it=>{
-      const row = el(`<div class="item"><div class="nm"><b>${esc(it.name)}</b>${it.desc?`<div class="ing">${esc(it.desc)}</div>`:''}${it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</div>
-        <button class="btn danger sm" style="width:auto">Remove</button></div>`);
-      row.querySelector('button').onclick=()=>{ draft[kind]=draft[kind].filter(x=>x.id!==it.id); drawOptions(); };
+      const details = optionDetails(it);
+      const row = el(`<div class="item"><div class="nm"><b>${esc(it.name)}</b>${details?`<div class="ing">${esc(details)}</div>`:''}${it.price?`<div class="pr">${fmtMoney(it.price)}</div>`:''}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn ghost sm" style="width:auto">Edit</button>
+          <button class="btn danger sm" style="width:auto">Remove</button>
+        </div>
+      </div>`);
+      const btns = row.querySelectorAll('button');
+      btns[0].onclick=()=> optionEditors[kind]?.beginEdit(it);
+      btns[1].onclick=()=>{
+        draft[kind]=draft[kind].filter(x=>x.id!==it.id);
+        if(optionEditors[kind]?.editingId===it.id) optionEditors[kind].reset();
+        drawOptions();
+      };
       box.appendChild(row);
     });
   });
@@ -834,7 +1023,7 @@ async function renderAllOrders(){
 
     // aggregate tallies
     const tally = {}; let total=0; const anyPrice = list.some(o=>o.items.some(i=>i.price));
-    list.forEach(o=>{ o.items.forEach(i=>{ tally[i.name]=(tally[i.name]||0)+i.qty; }); total+=o.total||0; });
+    list.forEach(o=>{ o.items.forEach(i=>{ const key = orderItemLabel(i); tally[key]=(tally[key]||0)+i.qty; }); total+=o.total||0; });
     const agg = el(`<div class="agg"><div class="ln" style="font-weight:700;color:var(--green)"><span>Kitchen summary</span><span></span></div>
       ${Object.entries(tally).sort((a,b)=>b[1]-a[1]).map(([n,q])=>`<div class="ln"><span>${esc(n)}</span><span class="q">${q}</span></div>`).join('')}
       ${anyPrice?`<div class="ln" style="font-weight:700"><span>Total value</span><span>${fmtMoney(total)}</span></div>`:''}
@@ -844,7 +1033,7 @@ async function renderAllOrders(){
     // per-member
     const box = el(`<div class="card"></div>`);
     list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
-      box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b>${o.memberCode?` <span class="it">(${esc(o.memberCode)})</span>`:''} — <span class="it">${o.items.map(i=>esc(i.name)).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
+      box.appendChild(el(`<div class="moe"><b>${esc(o.member)}</b>${o.memberCode?` <span class="it">(${esc(o.memberCode)})</span>`:''} — <span class="it">${o.items.map(i=>esc(orderItemLabel(i))).join(' · ')}</span>${o.total?` · <span style="color:var(--brass-d);font-weight:700">${fmtMoney(o.total)}</span>`:''}</div>`));
     });
     c.appendChild(box);
   });
@@ -860,13 +1049,13 @@ function downloadSummary(orders){
     const name=r?r.name:(list[0].restName||'Removed'); const dp=dayParts(r?r.date:list[0].date);
     out += `\n========================================\n${name}  (${dp.full||'no date'})  —  ${list.length} orders\n========================================\n`;
     const tally={}; let total=0;
-    list.forEach(o=>{o.items.forEach(i=>tally[i.name]=(tally[i.name]||0)+i.qty); total+=o.total||0;});
+    list.forEach(o=>{o.items.forEach(i=>{ const key = orderItemLabel(i); tally[key]=(tally[key]||0)+i.qty; }); total+=o.total||0;});
     out += 'KITCHEN SUMMARY:\n';
     Object.entries(tally).sort((a,b)=>b[1]-a[1]).forEach(([n,q])=> out+=`  ${q}x ${n}\n`);
     if(total) out += `  TOTAL VALUE: ${fmtMoney(total)}\n`;
     out += '\nPER MEMBER:\n';
     list.sort((a,b)=>a.member.localeCompare(b.member)).forEach(o=>{
-      out += `  ${o.member}${o.memberCode?` (${o.memberCode})`:''}: ${o.items.map(i=>i.name).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
+      out += `  ${o.member}${o.memberCode?` (${o.memberCode})`:''}: ${o.items.map(i=>orderItemLabel(i)).join(' / ')}${o.total?` (${fmtMoney(o.total)})`:''}\n`;
     });
   });
   const blob = new Blob([out],{type:'text/plain'});

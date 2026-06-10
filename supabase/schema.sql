@@ -12,7 +12,7 @@ create table if not exists public.restaurants (
   place       text,
   date        date,
   info        text,
-  food        jsonb not null default '[]',   -- [{id,name,price,desc}]
+  food        jsonb not null default '[]',   -- [{id,name,type,price,desc}]
   drinks      jsonb not null default '[]',
   created_at  timestamptz default now()
 );
@@ -26,7 +26,7 @@ create table if not exists public.orders (
   rest_name   text,
   place       text,
   date        date,
-  items       jsonb not null default '[]',   -- [{name,type,price,...}]
+  items       jsonb not null default '[]',   -- [{name,type,itemType,price,...}]
   total       numeric not null default 0,
   placed_at   timestamptz default now(),
   unique (member_uid, rest_id)               -- one final order per member per stop

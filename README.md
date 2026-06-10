@@ -124,7 +124,7 @@ Then share the one link with all members. On a phone they can **Add to Home Scre
 
 ## Day-to-day
 
-- **Menu setup:** add each restaurant (name, area, date, optional note) with its food and drink options. Each option can have an optional price and an optional ingredients/description line.
+- **Menu setup:** add each restaurant (name, area, date, optional note) with its food and drink options. Each option can have an optional type, price, and ingredients/description line, and the organiser can paste a formatted option list to import it in bulk.
 - **All orders:** every member's pick grouped by restaurant, a kitchen summary (e.g. *23 × Margherita*), an overall value, and a **Download summary** button for a plain-text file to send the venue.
 
 ---
